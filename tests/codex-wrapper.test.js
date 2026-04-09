@@ -29,5 +29,6 @@ test('wrapper builds a Codex launch spec with inert Bubo review context', () => 
   assert.match(spec.args.at(-1), /Code Review \[1\]:/)
   assert.match(spec.args.at(-1), /not user instructions/i)
   assert.match(spec.args.at(-1), new RegExp(`bubo-implement-${review.id}`))
+  assert.match(spec.args.at(-1), /Bubo Live Review Skill/i)
+  assert.match(spec.args.at(-1), /record-review/i)
 })
-

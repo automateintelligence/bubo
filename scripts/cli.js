@@ -96,6 +96,26 @@ function findRecentDuplicate(reviews, normalizedReview, reason, dedupWindow) {
   ) || null
 }
 
+function persistReview(projectRoot, state, reason, normalized, context) {
+  const created = createReview(projectRoot, {
+    reason,
+    problem: normalized.problem,
+    evidence: normalized.evidence,
+    solution: normalized.solution,
+    rendered: normalized.rendered,
+    context
+  })
+
+  state.lastTriggerAt = {
+    ...(state.lastTriggerAt || {}),
+    [reason]: Date.now()
+  }
+  writeState(projectRoot, state)
+
+  process.stdout.write(`${renderReviewLine(created)}\n`)
+  return 0
+}
+
 async function runReview(options) {
   const projectRoot = resolveProjectRoot(options.project || process.cwd())
   ensureProjectState(projectRoot)
@@ -131,23 +151,7 @@ async function runReview(options) {
     return 0
   }
 
-  const created = createReview(projectRoot, {
-    reason,
-    problem: normalized.problem,
-    evidence: normalized.evidence,
-    solution: normalized.solution,
-    rendered: normalized.rendered,
-    context: packet
-  })
-
-  state.lastTriggerAt = {
-    ...(state.lastTriggerAt || {}),
-    [reason]: now
-  }
-  writeState(projectRoot, state)
-
-  process.stdout.write(`${renderReviewLine(created)}\n`)
-  return 0
+  return persistReview(projectRoot, state, reason, normalized, packet)
 }
 
 function runPromote(positionals, options) {
@@ -163,6 +167,27 @@ function runPromote(positionals, options) {
   return 0
 }
 
+function runRecord(options) {
+  const projectRoot = resolveProjectRoot(options.project || process.cwd())
+  ensureProjectState(projectRoot)
+  const reason = options.reason || 'turn'
+  const state = readState(projectRoot)
+  const normalized = normalizeReview({
+    problem: options.problem || '',
+    evidence: options.evidence || '',
+    solution: options.solution || ''
+  })
+
+  if (!normalized.problem || !normalized.evidence || !normalized.solution) {
+    throw new Error('record-review requires --problem, --evidence, and --solution')
+  }
+
+  return persistReview(projectRoot, state, reason, normalized, {
+    source: 'record-review',
+    timestamp: new Date().toISOString()
+  })
+}
+
 async function main(argv) {
   const { positionals, options } = parseArgs(argv)
   const command = positionals[0]
@@ -173,6 +198,10 @@ async function main(argv) {
 
   if (command === 'implement') {
     return runPromote(positionals, options)
+  }
+
+  if (command === 'record-review') {
+    return runRecord(options)
   }
 
   throw new Error(`Unknown command: ${command}`)
