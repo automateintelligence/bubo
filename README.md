@@ -13,9 +13,22 @@ Primary commands:
 
 - `./scripts/bubo-review-code`
 - `./scripts/bubo-implement <id>`
+- `./scripts/bubo-codex`
 
 Run tests with:
 
 ```bash
 node --test tests/*.test.js
+```
+
+Start Codex with passive Bubo context:
+
+```bash
+./scripts/bubo-codex --project "$PWD" -- --no-alt-screen
+```
+
+Force a fresh startup review into the launch context:
+
+```bash
+./scripts/bubo-codex --project "$PWD" --reason manual --diff-text 'const draft = { alert_id: 0 }' -- --no-alt-screen
 ```
