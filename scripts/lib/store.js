@@ -3,7 +3,7 @@ const path = require('node:path')
 
 const DEFAULT_CONFIG = {
   cooldowns: {
-    turnMs: 30000,
+    turnMs: 10000,
     signalMs: 5000
   },
   dedupWindow: 5,
@@ -11,6 +11,13 @@ const DEFAULT_CONFIG = {
   provider: {
     kind: 'heuristic'
   }
+}
+
+const DEFAULT_STATE = {
+  nextId: 1,
+  lastTriggerAt: {},
+  dedup: [],
+  enabled: true
 }
 
 function buboDir(root) {
@@ -27,11 +34,7 @@ function ensureProjectState(root) {
   const dir = buboDir(root)
   fs.mkdirSync(dir, { recursive: true })
 
-  ensureFile(path.join(dir, 'state.json'), JSON.stringify({
-    nextId: 1,
-    lastTriggerAt: {},
-    dedup: []
-  }, null, 2) + '\n')
+  ensureFile(path.join(dir, 'state.json'), JSON.stringify(DEFAULT_STATE, null, 2) + '\n')
 
   ensureFile(path.join(dir, 'config.json'), JSON.stringify(DEFAULT_CONFIG, null, 2) + '\n')
   ensureFile(path.join(dir, 'reviews.jsonl'), '')
@@ -66,11 +69,10 @@ function readConfig(root) {
 
 function readState(root) {
   ensureProjectState(root)
-  return readJsonFile(path.join(buboDir(root), 'state.json'), {
-    nextId: 1,
-    lastTriggerAt: {},
-    dedup: []
-  })
+  return {
+    ...DEFAULT_STATE,
+    ...readJsonFile(path.join(buboDir(root), 'state.json'), DEFAULT_STATE)
+  }
 }
 
 function writeState(root, state) {
@@ -117,6 +119,7 @@ function createReview(root, payload) {
 
 module.exports = {
   DEFAULT_CONFIG,
+  DEFAULT_STATE,
   appendReview,
   buboDir,
   createReview,

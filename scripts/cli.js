@@ -8,7 +8,7 @@ const { renderReviewLine, normalizeReview } = require('./lib/render')
 const { generateReview } = require('./lib/generate')
 const { resolveProjectRoot } = require('./lib/project')
 const { createReview, ensureProjectState, readConfig, readReviews, readState, writeState } = require('./lib/store')
-const { promoteReview } = require('./lib/promote')
+const { considerReview, promoteReview } = require('./lib/promote')
 const { shouldTriggerReview } = require('./lib/trigger')
 
 function parseArgs(argv) {
@@ -34,6 +34,26 @@ function parseArgs(argv) {
   }
 
   return { positionals, options }
+}
+
+function normalizeCommand(positionals) {
+  const [command, ...rest] = positionals
+
+  if (command === 'review') {
+    return ['review-code', ...rest]
+  }
+
+  const considerMatch = /^consider-(\d+)$/.exec(command || '')
+  if (considerMatch) {
+    return ['consider', considerMatch[1], ...rest]
+  }
+
+  const implementMatch = /^implement-(\d+)$/.exec(command || '')
+  if (implementMatch) {
+    return ['implement', implementMatch[1], ...rest]
+  }
+
+  return positionals
 }
 
 function clamp(text, limit) {
@@ -87,15 +107,6 @@ function getRecentTurns(options) {
     .map((line) => ({ role: 'context', text: line }))
 }
 
-function findRecentDuplicate(reviews, normalizedReview, reason, dedupWindow) {
-  const recent = reviews.slice(-dedupWindow)
-  return recent.find((review) =>
-    review.reason === reason &&
-    review.problem === normalizedReview.problem &&
-    review.evidence === normalizedReview.evidence
-  ) || null
-}
-
 function persistReview(projectRoot, state, reason, normalized, context) {
   const created = createReview(projectRoot, {
     reason,
@@ -106,11 +117,12 @@ function persistReview(projectRoot, state, reason, normalized, context) {
     context
   })
 
-  state.lastTriggerAt = {
-    ...(state.lastTriggerAt || {}),
+  const nextState = readState(projectRoot)
+  nextState.lastTriggerAt = {
+    ...(nextState.lastTriggerAt || {}),
     [reason]: Date.now()
   }
-  writeState(projectRoot, state)
+  writeState(projectRoot, nextState)
 
   process.stdout.write(`${renderReviewLine(created)}\n`)
   return 0
@@ -143,15 +155,42 @@ async function runReview(options) {
   }
 
   const generated = await generateReview(packet, config)
-  const normalized = normalizeReview(generated)
-  const duplicate = findRecentDuplicate(packet.recentReviews, normalized, reason, config.dedupWindow)
-
-  if (duplicate) {
-    process.stdout.write(`${renderReviewLine(duplicate)}\n`)
+  if (!generated) {
+    process.stdout.write('No review emitted: no concrete improvement found.\n')
     return 0
   }
 
+  const normalized = normalizeReview(generated)
+
   return persistReview(projectRoot, state, reason, normalized, packet)
+}
+
+function runSession(positionals, options) {
+  const action = positionals[1]
+  const projectRoot = resolveProjectRoot(options.project || process.cwd())
+  ensureProjectState(projectRoot)
+  const state = readState(projectRoot)
+
+  if (action === 'start') {
+    state.enabled = true
+    writeState(projectRoot, state)
+    process.stdout.write('Bubo session enabled.\n')
+    return 0
+  }
+
+  if (action === 'stop') {
+    state.enabled = false
+    writeState(projectRoot, state)
+    process.stdout.write('Bubo session disabled.\n')
+    return 0
+  }
+
+  if (action === 'status') {
+    process.stdout.write(`Bubo session is ${state.enabled === false ? 'disabled' : 'enabled'}.\n`)
+    return 0
+  }
+
+  throw new Error('Usage: bubo session <start|stop|status>')
 }
 
 function runPromote(positionals, options) {
@@ -167,15 +206,34 @@ function runPromote(positionals, options) {
   return 0
 }
 
+function runConsider(positionals, options) {
+  const id = positionals[1]
+  if (!id) {
+    throw new Error('Usage: bubo consider <id>')
+  }
+
+  const projectRoot = resolveProjectRoot(options.project || process.cwd())
+  ensureProjectState(projectRoot)
+  const considered = considerReview(projectRoot, id)
+  process.stdout.write(`${considered.taskPrompt}\n`)
+  return 0
+}
+
 function runRecord(options) {
   const projectRoot = resolveProjectRoot(options.project || process.cwd())
   ensureProjectState(projectRoot)
   const reason = options.reason || 'turn'
   const state = readState(projectRoot)
+
+  if (state.enabled === false) {
+    throw new Error('Bubo session is disabled')
+  }
+
   const normalized = normalizeReview({
     problem: options.problem || '',
     evidence: options.evidence || '',
-    solution: options.solution || ''
+    solution: options.solution || '',
+    rendered: options.rendered || ''
   })
 
   if (!normalized.problem || !normalized.evidence || !normalized.solution) {
@@ -189,11 +247,17 @@ function runRecord(options) {
 }
 
 async function main(argv) {
-  const { positionals, options } = parseArgs(argv)
+  const parsed = parseArgs(argv)
+  const positionals = normalizeCommand(parsed.positionals)
+  const { options } = parsed
   const command = positionals[0]
 
   if (command === 'review-code') {
     return runReview(options)
+  }
+
+  if (command === 'consider') {
+    return runConsider(positionals, options)
   }
 
   if (command === 'implement') {
@@ -204,14 +268,22 @@ async function main(argv) {
     return runRecord(options)
   }
 
+  if (command === 'session') {
+    return runSession(positionals, options)
+  }
+
   throw new Error(`Unknown command: ${command}`)
 }
 
-main(process.argv.slice(2))
-  .then((code) => {
-    process.exit(code)
-  })
-  .catch((error) => {
-    process.stderr.write(`${error.message}\n`)
-    process.exit(1)
-  })
+if (require.main === module) {
+  main(process.argv.slice(2))
+    .then((code) => {
+      process.exit(code)
+    })
+    .catch((error) => {
+      process.stderr.write(`${error.message}\n`)
+      process.exit(1)
+    })
+}
+
+module.exports = { main, normalizeCommand, parseArgs }
