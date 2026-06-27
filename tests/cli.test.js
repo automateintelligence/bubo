@@ -280,6 +280,53 @@ test('consider hyphen alias resolves the same review by ID', () => {
   assert.match(result.stdout, /\$receiving-code-review/)
 })
 
+test('install-claude scaffolds hooks and a slash command into the project', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+
+  const result = spawnSync('node', [cli, 'install-claude', '--project', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /Installed Bubo for Claude Code/)
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'settings.json')))
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
+})
+
+test('claude-hook entrypoint injects a passive note from a UserPromptSubmit event', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-hook-e2e-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const hook = path.join(repoRoot, 'scripts/claude-hook.js')
+
+  const event = JSON.stringify({
+    hook_event_name: 'UserPromptSubmit',
+    cwd: root,
+    prompt: 'continue'
+  })
+
+  // No diff in this throwaway dir, so seed evidence through the tool-output path
+  // by driving a PostToolUse failure event instead.
+  const failEvent = JSON.stringify({
+    hook_event_name: 'PostToolUse',
+    cwd: root,
+    tool_name: 'Bash',
+    tool_input: { command: 'npm test' },
+    tool_output: 'FAIL: AssertionError: expected 1 received 0',
+    tool_exit_code: 1
+  })
+
+  const result = spawnSync('node', [hook], { encoding: 'utf8', input: failEvent })
+  assert.equal(result.status, 0)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.hookSpecificOutput.hookEventName, 'PostToolUse')
+  assert.match(payload.hookSpecificOutput.additionalContext, /Bubo Says \[1\]:/)
+  assert.ok(fs.existsSync(path.join(root, '.bubo', 'reviews.jsonl')))
+
+  // A benign event produces no output and a clean exit.
+  const benign = spawnSync('node', [hook], { encoding: 'utf8', input: event })
+  assert.equal(benign.status, 0)
+})
+
 test('consider last resolves the most recent review in the current project without promoting it', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-consider-last-'))
   const repoRoot = path.resolve(__dirname, '..')

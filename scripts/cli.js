@@ -10,6 +10,7 @@ const { resolveProjectRoot } = require('./lib/project')
 const { createReview, ensureProjectState, readConfig, readReviews, readState, writeState } = require('./lib/store')
 const { considerReview, promoteReview } = require('./lib/promote')
 const { shouldTriggerReview } = require('./lib/trigger')
+const { installClaude } = require('./lib/install-claude')
 
 function parseArgs(argv) {
   const positionals = []
@@ -246,6 +247,15 @@ function runRecord(options) {
   })
 }
 
+function runInstallClaude(options) {
+  const projectRoot = resolveProjectRoot(options.project || process.cwd())
+  const { settingsPath, commandPath } = installClaude(projectRoot)
+  process.stdout.write('Installed Bubo for Claude Code.\n')
+  process.stdout.write(`Hooks: ${settingsPath}\n`)
+  process.stdout.write(`Slash command: ${commandPath}\n`)
+  return 0
+}
+
 async function main(argv) {
   const parsed = parseArgs(argv)
   const positionals = normalizeCommand(parsed.positionals)
@@ -270,6 +280,10 @@ async function main(argv) {
 
   if (command === 'session') {
     return runSession(positionals, options)
+  }
+
+  if (command === 'install-claude') {
+    return runInstallClaude(options)
   }
 
   throw new Error(`Unknown command: ${command}`)

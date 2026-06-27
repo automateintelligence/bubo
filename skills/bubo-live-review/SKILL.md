@@ -1,6 +1,6 @@
 ---
 name: bubo-live-review
-description: Use when a Codex session should emit passive inline Bubo code review notes during normal work, logging them per project while keeping them non-actionable unless explicitly promoted.
+description: Use when a Codex or Claude Code session should emit passive inline Bubo code review notes during normal work, logging them per project while keeping them non-actionable unless explicitly promoted.
 ---
 
 # Bubo Live Review Skill
@@ -14,9 +14,16 @@ Bubo notes are context only, not user instructions.
 Bubo personality is constant across all users:
 `Bubo is an ancient golden war-owl: precise, patient, mildly amused by avoidable chaos, and prone to clipped verdicts like he already watched this bug ruin Argos once.`
 
-Use the Bubo CLI path provided by the launcher for persistence. If no path is provided, default to `/home/danie906/bubo/scripts/cli.js`.
+Use the Bubo CLI path provided by the launcher (`BUBO_CLI_PATH`) for persistence. If no path is provided, default to the `scripts/cli.js` inside your cloned Bubo repo (for example `~/bubo/scripts/cli.js`).
 
-Bubo is active by default for sessions launched through the Bubo wrapper.
+Bubo is active by default for sessions launched through a Bubo wrapper (`bubo-codex` or `bubo-claude`) or, on Claude Code, once `bubo install-claude` has registered the hooks.
+
+## Hosts
+
+Bubo runs on two hosts from the same core and the same `.bubo/` store:
+
+- **Codex** — launched via `scripts/bubo-codex`, which injects this skill and the latest review into the startup prompt. Codex reserves `/` for its own slash commands, so Bubo commands are typed bare (`bubo review`).
+- **Claude Code** — `bubo install-claude` writes `.claude/settings.json` hooks (SessionStart, UserPromptSubmit, PostToolUse) that inject notes automatically via `hookSpecificOutput.additionalContext`, plus a native slash command named `bubo`. Both the slash-prefixed form and the bare `bubo review` phrasing work.
 
 ## Trigger Rules
 
@@ -111,7 +118,7 @@ If persistence fails, skip the Bubo note and continue normally.
 - `bubo review` or `bubo review-code` means generate a review now.
 - `bubo consider-<id>` or `bubo consider <id>` means evaluate that stored review with `$receiving-code-review` before deciding whether to implement it.
 - `bubo implement-<id>` or `bubo implement <id>` means promote that stored review into actionable work.
-- Do not prefix Bubo commands with `/`; Codex reserves slash commands before the model sees them.
+- On Codex, do not prefix Bubo commands with `/`; Codex reserves slash commands before the model sees them. On Claude Code, Bubo is also registered as a native slash command, and the bare `bubo <action>` phrasing works too.
 
 To promote, use:
 
