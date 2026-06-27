@@ -4,7 +4,8 @@ const path = require('node:path')
 const DEFAULT_CONFIG = {
   cooldowns: {
     turnMs: 10000,
-    signalMs: 5000
+    signalMs: 5000,
+    reflectMs: 900000
   },
   dedupWindow: 5,
   largeDiffThreshold: 80,

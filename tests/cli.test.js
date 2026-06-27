@@ -293,6 +293,23 @@ test('install-claude scaffolds hooks and a slash command into the project', () =
   assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
 })
 
+test('install sets up the detected host(s) in one command', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install1-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+
+  const result = spawnSync('node', [cli, 'install', '--project', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  // Claude side is scaffolded into the project...
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'settings.json')))
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
+  // ...and the Codex side is explained (no per-project files, just the wrapper).
+  assert.match(result.stdout, /Claude Code/)
+  assert.match(result.stdout, /Codex/)
+  assert.match(result.stdout, /bubo-codex/)
+})
+
 test('claude-hook entrypoint injects a passive note from a UserPromptSubmit event', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-hook-e2e-'))
   const repoRoot = path.resolve(__dirname, '..')

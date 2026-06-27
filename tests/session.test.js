@@ -4,8 +4,14 @@ const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
 
-const { createReview, readReviews } = require('../scripts/lib/store')
-const { buildStartupPrompt, createStartReview } = require('../scripts/lib/session')
+const { createReview, readReviews, readConfig } = require('../scripts/lib/store')
+const {
+  buildStartupPrompt,
+  createStartReview,
+  dueForReflection,
+  markReflection,
+  reflectionNudge
+} = require('../scripts/lib/session')
 
 function makeReview(root) {
   return createReview(root, {
@@ -64,4 +70,58 @@ test('startup review stays silent when no concrete improvement is found', async 
 
   assert.equal(review, null)
   assert.equal(readReviews(root).length, 0)
+})
+
+test('the working diff is read lazily — never when the cooldown blocks the turn', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-lazy-'))
+  let reads = 0
+  const getDiff = () => { reads += 1; return 'const draft = { alert_id: 0 }' }
+  const now = 5_000_000
+
+  const first = await createStartReview(root, { reason: 'turn', getDiff, now, freshOnly: true })
+  const second = await createStartReview(root, { reason: 'turn', getDiff, now, freshOnly: true })
+
+  assert.ok(first)
+  assert.equal(second, null) // blocked by the freshly-stamped turn cooldown
+  assert.equal(reads, 1) // the diff was not read on the blocked turn
+})
+
+test('dedup suppresses a note whose problem matches a recent one', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-dedup-'))
+  const diff = 'const draft = { alert_id: 0 }'
+  const turnMs = readConfig(root).cooldowns.turnMs
+
+  const first = await createStartReview(root, { reason: 'turn', 'diff-text': diff, now: 5_000_000 })
+  const second = await createStartReview(root, { reason: 'turn', 'diff-text': diff, now: 5_000_000 + turnMs + 1 })
+
+  assert.ok(first)
+  assert.equal(second, null)
+  assert.equal(readReviews(root).length, 1)
+})
+
+test('reflection cadence is due on a fresh project and resets after it fires', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-reflect-'))
+  const reflectMs = readConfig(root).cooldowns.reflectMs
+  const start = 9_000_000
+
+  assert.equal(dueForReflection(root, start), true)
+  markReflection(root, start)
+  assert.equal(dueForReflection(root, start + 1000), false)
+  assert.equal(dueForReflection(root, start + reflectMs + 1), true)
+})
+
+test('reflection cadence stays silent while Bubo is disabled', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-reflect-off-'))
+  const { readState, writeState } = require('../scripts/lib/store')
+  const state = readState(root)
+  state.enabled = false
+  writeState(root, state)
+
+  assert.equal(dueForReflection(root, 9_000_000), false)
+})
+
+test('reflection nudge invites an open-ended model review and record-review', () => {
+  const nudge = reflectionNudge()
+  assert.match(nudge, /open-ended|open ended/i)
+  assert.match(nudge, /record-review/)
 })

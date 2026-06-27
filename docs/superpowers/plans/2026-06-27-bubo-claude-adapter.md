@@ -47,9 +47,22 @@ command, built test-first.
 - [x] Update `README.md` with the Claude Code install + trigger mapping.
 - [x] Add the design spec under `docs/superpowers/specs/`.
 
+### Task 6: Usefulness / speed / ease follow-up
+
+- [x] Expand the Path A heuristic catalog (`tests/generate.test.js`,
+  `scripts/lib/generate.js`); scan added diff lines only.
+- [x] Add the Path B reflection cadence (`dueForReflection`, `markReflection`,
+  `reflectionNudge`, `reflectMs` config) and wire it into the Claude
+  `UserPromptSubmit` hook.
+- [x] Make evidence reading lazy + throttle the cooldown on every look (speed).
+- [x] Suppress duplicate notes, exempting explicit `manual` reviews (usefulness).
+- [x] Add a one-command `bubo install` that detects hosts (ease).
+
 ### Verification
 
-- [x] `node --test tests/*.test.js` — all tests pass.
-- [x] `node scripts/cli.js install-claude` smoke test scaffolds settings + command.
+- [x] `node --test tests/*.test.js` — all tests pass (64).
+- [x] `node scripts/cli.js install` smoke test scaffolds settings + command and
+  prints the Codex alias.
 - [x] `node scripts/claude-hook.js` smoke test injects a note from a PostToolUse
-  failure event and stays silent on benign input.
+  failure event, emits the reflection nudge on a fresh project, and stays silent
+  on benign input.

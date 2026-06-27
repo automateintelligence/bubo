@@ -113,9 +113,53 @@ TDD throughout, `node:test` only:
 - `tests/cli.test.js` — `install-claude` and the `claude-hook.js` entrypoint
   end-to-end.
 
+## Follow-up: usefulness, speed, ease
+
+A second pass tuned the three product axes the maintainer cares about, without
+changing the skill prompt (Path B's wording is left as the source of truth).
+
+### Expanded heuristic catalog (Path A)
+
+`scripts/lib/generate.js` grew from five patterns to a curated, priority-ordered
+catalog (security → correctness → hygiene): hardcoded secrets/keys,
+`eval`/`exec` on dynamic input, string-built SQL, `Math.random` for security
+values, destructive shell, sentinel IDs, focused/skipped tests, left-in
+debuggers, checker suppression, `as any` escape hatches, empty catch, oversized
+diff, and FIXME/XXX/HACK markers. Content scanning is scoped to **added** diff
+lines (`reviewableSource`), so removing risky code never produces a finding.
+
+### Reflection cadence (Path B shortcut)
+
+A long-cooldown trigger (`reflectMs`, default 15 min) lets the model perform an
+open-ended review the heuristics cannot express. `dueForReflection` /
+`markReflection` live in the session core; the Claude `UserPromptSubmit` hook
+emits `reflectionNudge()` as additional context when due. Path A (fast,
+deterministic) is the always-on floor; Path B is the occasional deeper layer.
+
+### Speed: lazy evidence + look-throttling
+
+`createStartReview` now stamps the cooldown on every *look*, not only on emit,
+and reads the working tree through lazy thunks (`getDiff` / `getChangedFiles`)
+resolved only after the gate opens. Net effect: at most one `git diff` per
+cooldown window, and none at all on a gated turn.
+
+### Usefulness: dedup
+
+A fresh note whose problem fingerprint matches a recent one is suppressed.
+Explicit `manual` reviews are exempt — an on-demand `bubo review` always speaks.
+
+### Ease: one-command install
+
+`bubo install` detects the available hosts, scaffolds the Claude integration,
+and prints the Codex alias. `install-claude` remains for Claude-only setup.
+
 ## Decisions Made
 
 - Hook-based integration for Claude Code, not prompt-only.
+- Heuristics (fast floor) and model review (occasional depth) are complementary
+  generators, gated independently, sharing one `.bubo/` store.
+- Content heuristics scan added lines only; security findings outrank hygiene.
+- Cooldown throttles on look, not emit, so passive review is cheap.
 - Shared core extracted so Codex and Claude cannot drift.
 - `freshOnly` semantics prevent stale-note repetition on hook turns.
 - Native `/bubo` slash command on Claude; bare phrasing retained for parity.

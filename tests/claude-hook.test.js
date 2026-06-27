@@ -111,6 +111,27 @@ test('classifyToolEvent maps failure signals to trigger reasons', () => {
   assert.equal(classifyToolEvent({ tool_name: 'Read', tool_response: 'file contents' }), null)
 })
 
+test('UserPromptSubmit injects an open-ended reflection nudge on the slow cadence', async () => {
+  const root = tmpProject('reflect')
+  // No diff, so the heuristic path stays silent; only the reflection cadence
+  // can speak. It is due on a fresh project.
+  const out = await handleHookEvent(
+    { hook_event_name: 'UserPromptSubmit', cwd: root, prompt: 'continue' },
+    noDeps(root, { now: () => 9_000_000 })
+  )
+
+  assert.equal(out.hookSpecificOutput.hookEventName, 'UserPromptSubmit')
+  assert.match(out.hookSpecificOutput.additionalContext, /record-review/)
+  assert.equal(readReviews(root).length, 0) // the model authors it, not the heuristic
+
+  // It does not fire again on the very next prompt.
+  const again = await handleHookEvent(
+    { hook_event_name: 'UserPromptSubmit', cwd: root, prompt: 'and again' },
+    noDeps(root, { now: () => 9_000_000 + 1000 })
+  )
+  assert.equal(again, null)
+})
+
 test('unknown hook events are ignored', async () => {
   const root = tmpProject('unknown')
   const out = await handleHookEvent({ hook_event_name: 'PreCompact', cwd: root }, noDeps(root))

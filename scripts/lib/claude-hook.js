@@ -2,7 +2,13 @@ const { execSync } = require('node:child_process')
 
 const { ensureProjectState, readReviews, readState } = require('./store')
 const { renderReviewLine } = require('./render')
-const { buildStartupPrompt, createStartReview } = require('./session')
+const {
+  buildStartupPrompt,
+  createStartReview,
+  dueForReflection,
+  markReflection,
+  reflectionNudge
+} = require('./session')
 
 const FAILURE_PATTERN = /\b(fail(?:ed|ing|ure)?|not ok|✗|assertion\s*error|expect(?:ed)?\b.*\breceived)\b/i
 const ERROR_PATTERN = /\b(error|exception|traceback|panic|fatal|segfault|unhandled)\b/i
@@ -74,8 +80,8 @@ async function handleHookEvent(event, deps = {}) {
   if (eventName === 'SessionStart') {
     const review = await createStartReview(projectRoot, {
       reason: 'turn',
-      'diff-text': gitDiff(),
-      changedFiles: changedFiles(),
+      getDiff: gitDiff,
+      getChangedFiles: changedFiles,
       now: now()
     })
     return {
@@ -88,18 +94,30 @@ async function handleHookEvent(event, deps = {}) {
 
   if (eventName === 'UserPromptSubmit') {
     if (readState(projectRoot).enabled === false) return null
+
+    // Fast path: heuristic note from the working diff (read lazily, only once
+    // the cooldown opens). Slow path: an occasional open-ended model-review
+    // nudge. Either, both, or neither may fire on a given turn.
+    const parts = []
     const review = await createStartReview(projectRoot, {
       reason: 'turn',
-      'diff-text': gitDiff(),
-      changedFiles: changedFiles(),
+      getDiff: gitDiff,
+      getChangedFiles: changedFiles,
       freshOnly: true,
       now: now()
     })
-    if (!review) return null
+    if (review) parts.push(passiveContext(review))
+
+    if (dueForReflection(projectRoot, now())) {
+      markReflection(projectRoot, now())
+      parts.push(reflectionNudge())
+    }
+
+    if (!parts.length) return null
     return {
       hookSpecificOutput: {
         hookEventName: 'UserPromptSubmit',
-        additionalContext: passiveContext(review)
+        additionalContext: parts.join('\n\n')
       }
     }
   }
@@ -111,8 +129,8 @@ async function handleHookEvent(event, deps = {}) {
     const review = await createStartReview(projectRoot, {
       reason,
       'tool-output-text': toolOutputText(event),
-      'diff-text': gitDiff(),
-      changedFiles: changedFiles(),
+      getDiff: gitDiff,
+      getChangedFiles: changedFiles,
       freshOnly: true,
       now: now()
     })

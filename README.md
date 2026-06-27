@@ -78,9 +78,19 @@ You can also force a fresh startup review into the launch context:
 ```bash
 codex-bubo --reason manual --diff-text 'const draft = { alert_id: 0 }'
 ```
+### One-command install
+
+From inside the project you want Bubo to watch:
+
+```bash
+node scripts/cli.js install --project "$(pwd)"
+```
+
+This detects which hosts you have, scaffolds the Claude Code integration into the project, and prints the Codex shell-alias snippet. Use it if you just want Bubo running with no further reading.
+
 ### Launch Claude Code with Bubo
 
-Claude Code integrates through native hooks rather than a startup prompt. Install once per project:
+Claude Code integrates through native hooks rather than a startup prompt. `bubo install` (above) does this for you, or you can target Claude explicitly:
 
 ```bash
 node scripts/cli.js install-claude --project "$(pwd)"
@@ -98,6 +108,7 @@ Trigger mapping on Claude Code:
 - `SessionStart` injects the live-review skill and the latest stored note as context.
 - `UserPromptSubmit` runs a passive `turn` review against the working diff (subject to cooldown and the per-project enable flag), surfacing at most one fresh note per turn.
 - `PostToolUse` (Bash) classifies failing output into a `test-fail` or `error` review so Bubo speaks up exactly when something just broke.
+- On a slow cadence, `UserPromptSubmit` also injects an open-ended model-review nudge (Path B) so Bubo periodically reviews with judgment, not just patterns.
 
 A convenience launcher is also available if you prefer to start sessions through a wrapper:
 
@@ -133,7 +144,14 @@ Each review record can contain:
 
 The live-review skill keeps those notes inert by default. A Bubo note is not a task. It becomes actionable only when you explicitly promote it with `bubo implement <id>`.
 
-The current default provider is heuristic. Out of the box, Bubo knows how to notice a few specific messes, such as fixed sentinel IDs, swallowed exceptions, `@ts-ignore` suppression, large diffs, and obvious recent failures in visible tool output.
+### Two ways a note is generated
+
+Bubo has two independent generators that write into the same store:
+
+- **Heuristics (Path A, default, fast).** Pure pattern matching over the *added* lines of your diff — no model call. The curated catalog covers, in priority order: hardcoded secrets and private keys, `eval`/`exec` on dynamic input, string-built SQL (injection), `Math.random` for security values, destructive shell (`rm -rf`, force-push, pipe-to-shell), sentinel IDs, focused/skipped tests (`.only`, `.skip`, `fit`), left-in debuggers (`debugger`, `pdb.set_trace`, `pry`), checker suppression (`@ts-ignore`, `eslint-disable`, `# type: ignore`, `@SuppressWarnings`), `as any` / `as unknown as` escape hatches, empty `catch {}`, oversized diffs, `FIXME`/`XXX`/`HACK` markers, and failure signals in tool output. Scanning is scoped to added lines, so removing risky code never trips a note.
+- **Model review (Path B, occasional, deeper).** On a long cooldown (default 15 minutes) Bubo asks the host model to perform one open-ended review of recent work — design risk, drift, subtle correctness — the kind of judgment regex can't express, persisted with `record-review`. This is governed by the `bubo-live-review` skill, not the heuristics.
+
+Near-duplicate notes are suppressed: if a fresh observation matches one Bubo already made recently, it stays quiet (an explicit `bubo review` is never suppressed). The working diff is read lazily and at most once per cooldown window, so passive review adds no per-prompt git cost during an editing burst.
 
 ### Use the CLI directly
 
