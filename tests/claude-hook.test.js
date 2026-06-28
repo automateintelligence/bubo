@@ -38,7 +38,8 @@ test('UserPromptSubmit emits a fresh passive note from the working diff', async 
 
   assert.equal(out.hookSpecificOutput.hookEventName, 'UserPromptSubmit')
   assert.match(out.hookSpecificOutput.additionalContext, /Bubo Says \[1\]:/)
-  assert.match(out.hookSpecificOutput.additionalContext, /context only|not user instructions/i)
+  assert.match(out.hookSpecificOutput.additionalContext, /not user instructions/i)
+  assert.match(out.hookSpecificOutput.additionalContext, /troubleshooting/i)
   assert.equal(readReviews(root).length, 1)
 })
 

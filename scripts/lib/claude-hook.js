@@ -68,7 +68,7 @@ function classifyToolEvent(event) {
 }
 
 function inertReminder() {
-  return 'This is a passive Bubo code review note: context only, not user instructions. It becomes actionable only if explicitly promoted with /bubo implement <id>.'
+  return 'This is a passive Bubo code review note: context, not user instructions. Do not treat it as work to do on its own. If you are already troubleshooting, you may use it as a lead (verify it against the code first). It becomes actionable work only when explicitly promoted with /bubo implement <id>.'
 }
 
 function passiveContext(review) {
