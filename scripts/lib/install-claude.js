@@ -76,6 +76,9 @@ function installClaude(projectRoot, { repoRoot } = {}) {
   settings.hooks.SessionStart = mergeHook(settings.hooks.SessionStart, buboHookEntry(hookCommand, '*'))
   settings.hooks.UserPromptSubmit = mergeHook(settings.hooks.UserPromptSubmit, buboHookEntry(hookCommand, '*'))
   settings.hooks.PostToolUse = mergeHook(settings.hooks.PostToolUse, buboHookEntry(hookCommand, 'Bash'))
+  // Failed Bash commands fire PostToolUseFailure, not PostToolUse — register
+  // both so a failing test or build actually triggers a signal review.
+  settings.hooks.PostToolUseFailure = mergeHook(settings.hooks.PostToolUseFailure, buboHookEntry(hookCommand, 'Bash'))
   fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2) + '\n')
 
   const commandPath = path.join(commandsDir, 'bubo.md')

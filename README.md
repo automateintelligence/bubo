@@ -98,7 +98,7 @@ node scripts/cli.js install-claude --project "$(pwd)"
 
 This writes:
 
-- `.claude/settings.json` — `SessionStart`, `UserPromptSubmit`, and `PostToolUse` hooks that call `scripts/claude-hook.js`. The hook reads the event JSON on stdin and, when a review fires, injects the passive note into the session via `hookSpecificOutput.additionalContext`. It stays silent and exits cleanly when nothing fires, so it never disrupts the session.
+- `.claude/settings.json` — `SessionStart`, `UserPromptSubmit`, `PostToolUse`, and `PostToolUseFailure` hooks that call `scripts/claude-hook.js`. The hook reads the event JSON on stdin and, when a review fires, injects the passive note into the session via `hookSpecificOutput.additionalContext`. It stays silent and exits cleanly when nothing fires, so it never disrupts the session.
 - `.claude/commands/bubo.md` — a native `/bubo` slash command. `/bubo review`, `/bubo consider <id>`, `/bubo implement <id>`, `/bubo start`, `/bubo stop`, and `/bubo status` all work.
 
 The install is idempotent and merges into any existing `.claude/settings.json` without clobbering unrelated hooks.
@@ -107,7 +107,7 @@ Trigger mapping on Claude Code:
 
 - `SessionStart` injects the live-review skill and the latest stored note as context.
 - `UserPromptSubmit` runs a passive `turn` review against the working diff (subject to cooldown and the per-project enable flag), surfacing at most one fresh note per turn.
-- `PostToolUse` (Bash) classifies failing output into a `test-fail` or `error` review so Bubo speaks up exactly when something just broke.
+- `PostToolUse` / `PostToolUseFailure` (Bash) classify failing output into a `test-fail` or `error` review so Bubo speaks up exactly when something just broke. Failed commands fire `PostToolUseFailure`, so both are registered.
 - On a slow cadence, `UserPromptSubmit` also injects an open-ended model-review nudge (Path B) so Bubo periodically reviews with judgment, not just patterns.
 
 A convenience launcher is also available if you prefer to start sessions through a wrapper:

@@ -41,16 +41,7 @@ function reviewableSource(packet) {
 // added/raw source; `review` is the normalized note in Bubo's voice. Order is
 // priority order: security first, then correctness, then hygiene.
 const CONTENT_HEURISTICS = [
-  {
-    id: 'sentinel-id',
-    test: /\balert_id\s*[:=]\s*0\b/,
-    review: {
-      problem: 'placeholder alert_id=0 can collide under concurrent speculative bursts',
-      evidence: 'the diff introduces a fixed sentinel before VLM resolution',
-      solution: 'allocate a unique temporary client-side ID and reconcile after VLM returns',
-      rendered: 'sentinel id. race bait. mint a temp id first'
-    }
-  },
+  // --- Security (highest severity, evaluated first) ---
   {
     id: 'hardcoded-secret',
     test: /(?:api[_-]?key|secret|password|passwd|token|client[_-]?secret)\s*[:=]\s*['"][^'"\s]{8,}['"]|AKIA[0-9A-Z]{16}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i,
@@ -101,6 +92,18 @@ const CONTENT_HEURISTICS = [
       rendered: 'rm -rf in the diff. one typo from ruin. scope it and guard it'
     }
   },
+  // --- Correctness ---
+  {
+    id: 'sentinel-id',
+    test: /\balert_id\s*[:=]\s*0\b/,
+    review: {
+      problem: 'placeholder alert_id=0 can collide under concurrent speculative bursts',
+      evidence: 'the diff introduces a fixed sentinel before VLM resolution',
+      solution: 'allocate a unique temporary client-side ID and reconcile after VLM returns',
+      rendered: 'sentinel id. race bait. mint a temp id first'
+    }
+  },
+  // --- Hygiene / quality ---
   {
     id: 'focused-test',
     test: /\b(?:describe|it|test|context)\.only\s*\(|\b(?:fdescribe|fit)\s*\(/,

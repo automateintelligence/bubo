@@ -54,6 +54,13 @@ function normalizeCommand(positionals) {
     return ['implement', implementMatch[1], ...rest]
   }
 
+  // Bare session controls. The generated /bubo slash command expands
+  // `/bubo stop` to `cli.js stop ...`, so accept start/stop/status directly
+  // and route them to the session handler.
+  if (['start', 'stop', 'status'].includes(command)) {
+    return ['session', command, ...rest]
+  }
+
   return positionals
 }
 

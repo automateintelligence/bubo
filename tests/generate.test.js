@@ -50,6 +50,13 @@ test('generator prioritizes a security finding over a hygiene finding', async ()
   assert.match(`${result.problem} ${result.rendered}`, /secret|credential|key/i)
 })
 
+test('generator prioritizes a security finding over a correctness finding', async () => {
+  // A diff carrying both a hardcoded secret and a sentinel id must surface the
+  // higher-severity security issue first.
+  const result = await review('+ const draft = { alert_id: 0 }\n+ const apiKey = "sk_live_ab12cd34ef56gh78ij90"')
+  assert.match(`${result.problem} ${result.rendered}`, /secret|credential|key/i)
+})
+
 test('generator emits a sentinel-id collision review from diff evidence', async () => {
   const review = await generateReview({
     reason: 'large-diff',

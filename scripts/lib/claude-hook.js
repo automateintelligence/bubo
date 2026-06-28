@@ -1,6 +1,7 @@
 const { execSync } = require('node:child_process')
 
 const { ensureProjectState, readReviews, readState } = require('./store')
+const { resolveProjectRoot } = require('./project')
 const { renderReviewLine } = require('./render')
 const {
   buildStartupPrompt,
@@ -33,25 +34,33 @@ function defaultChangedFiles(projectRoot) {
   return output ? output.split('\n').filter(Boolean) : []
 }
 
-// Normalize the tool output field across Claude Code versions. Recent builds
-// pass `tool_output` (a string) plus `tool_exit_code`; older ones pass
-// `tool_response` (string or structured object).
+// Normalize the tool output across Claude Code versions and events. Builds may
+// pass `tool_output` (string) or `tool_response` (string/object); a
+// PostToolUseFailure event also carries an `error` object whose message holds
+// the exit status. Fold them all into one searchable string.
 function toolOutputText(event) {
   const raw = event.tool_output ?? event.tool_response ?? ''
-  if (typeof raw === 'string') return raw
-  try {
-    return JSON.stringify(raw)
-  } catch {
-    return ''
+  let base = typeof raw === 'string' ? raw : ''
+  if (!base && raw) {
+    try {
+      base = JSON.stringify(raw)
+    } catch {
+      base = ''
+    }
   }
+  const errorMessage = event.error && event.error.message ? String(event.error.message) : ''
+  return [base, errorMessage].filter(Boolean).join('\n')
 }
 
-// Classify a PostToolUse event into a Bubo trigger reason, or null when the
-// observed output carries no failure signal worth reviewing.
+// Classify a tool event into a Bubo trigger reason, or null when nothing is
+// worth reviewing. A PostToolUseFailure event is a failure by definition;
+// PostToolUse only ever reaches here on success, so it relies on the output
+// (or a legacy exit-code field) to reveal a problem.
 function classifyToolEvent(event) {
-  const exitCode = event.tool_exit_code
   const output = toolOutputText(event)
-  const failed = exitCode !== undefined && exitCode !== null && Number(exitCode) !== 0
+  const exitCode = event.tool_exit_code
+  const failed = event.hook_event_name === 'PostToolUseFailure' ||
+    (exitCode !== undefined && exitCode !== null && Number(exitCode) !== 0)
 
   if (FAILURE_PATTERN.test(output)) return 'test-fail'
   if (failed || ERROR_PATTERN.test(output)) return 'error'
@@ -69,7 +78,10 @@ function passiveContext(review) {
 // Pure, dependency-injected hook router. `deps` may override projectRoot, the
 // clock, and the git readers so the behavior is testable without a real repo.
 async function handleHookEvent(event, deps = {}) {
-  const projectRoot = deps.projectRoot || event.cwd || process.cwd()
+  // Claude's hook payload carries `cwd`, which may be a subdirectory of the
+  // project. Resolve it to the git root (as the CLI does) so `.bubo` state and
+  // history live in one place and the controls stay consistent.
+  const projectRoot = deps.projectRoot || resolveProjectRoot(event.cwd || process.cwd())
   const gitDiff = deps.gitDiff || (() => defaultGitDiff(projectRoot))
   const changedFiles = deps.changedFiles || (() => defaultChangedFiles(projectRoot))
   const now = deps.now || (() => Date.now())
@@ -122,7 +134,10 @@ async function handleHookEvent(event, deps = {}) {
     }
   }
 
-  if (eventName === 'PostToolUse') {
+  // PostToolUse fires on success; PostToolUseFailure on a non-zero tool exit.
+  // The signal-driven review handles both, since failing commands are exactly
+  // what we want Bubo to react to.
+  if (eventName === 'PostToolUse' || eventName === 'PostToolUseFailure') {
     if (readState(projectRoot).enabled === false) return null
     const reason = classifyToolEvent(event)
     if (!reason) return null
@@ -137,7 +152,7 @@ async function handleHookEvent(event, deps = {}) {
     if (!review) return null
     return {
       hookSpecificOutput: {
-        hookEventName: 'PostToolUse',
+        hookEventName: eventName,
         additionalContext: passiveContext(review)
       }
     }

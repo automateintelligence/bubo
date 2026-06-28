@@ -109,6 +109,30 @@ test('classifyToolEvent maps failure signals to trigger reasons', () => {
   assert.equal(classifyToolEvent({ tool_name: 'Bash', tool_exit_code: 1, tool_output: 'Traceback (most recent call last):' }), 'error')
   assert.equal(classifyToolEvent({ tool_name: 'Bash', tool_exit_code: 0, tool_output: 'ok' }), null)
   assert.equal(classifyToolEvent({ tool_name: 'Read', tool_response: 'file contents' }), null)
+  // A PostToolUseFailure event is a failure by definition, even without a
+  // recognizable pattern or an exit code field.
+  assert.equal(classifyToolEvent({
+    hook_event_name: 'PostToolUseFailure',
+    tool_name: 'Bash',
+    tool_output: 'command not found',
+    error: { message: 'Process exited with code 127' }
+  }), 'error')
+})
+
+test('PostToolUseFailure produces a review (PostToolUse alone fires only on success)', async () => {
+  const root = tmpProject('postfailevent')
+  const out = await handleHookEvent({
+    hook_event_name: 'PostToolUseFailure',
+    cwd: root,
+    tool_name: 'Bash',
+    tool_input: { command: 'npm test' },
+    tool_output: 'AssertionError: expected 1 received 0',
+    error: { type: 'execution_error', message: 'Process exited with code 1' }
+  }, noDeps(root))
+
+  assert.equal(out.hookSpecificOutput.hookEventName, 'PostToolUseFailure')
+  assert.match(out.hookSpecificOutput.additionalContext, /Bubo Says \[1\]:/)
+  assert.equal(readReviews(root).length, 1)
 })
 
 test('UserPromptSubmit injects an open-ended reflection nudge on the slow cadence', async () => {
@@ -139,6 +163,30 @@ test('UserPromptSubmit injects an open-ended reflection nudge on the slow cadenc
     noDeps(root, { now: () => start + reflectMs + 2000 })
   )
   assert.equal(again, null)
+})
+
+test('hook cwd is resolved to the git root so state is shared, not split per subdirectory', async () => {
+  const { execSync } = require('node:child_process')
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-claude-cwd-'))
+  execSync(`git -C "${repo}" init -q`)
+  const sub = path.join(repo, 'packages', 'app')
+  fs.mkdirSync(sub, { recursive: true })
+
+  // A PostToolUse fired from a subdirectory must persist under the repo root,
+  // not under the subdirectory. (No projectRoot dep here — exercise the real
+  // resolution path.)
+  const out = await handleHookEvent({
+    hook_event_name: 'PostToolUse',
+    cwd: sub,
+    tool_name: 'Bash',
+    tool_input: { command: 'npm test' },
+    tool_output: 'FAIL: AssertionError',
+    tool_exit_code: 1
+  }, { gitDiff: () => '', changedFiles: () => [] })
+
+  assert.ok(out)
+  assert.ok(fs.existsSync(path.join(repo, '.bubo', 'reviews.jsonl')))
+  assert.ok(!fs.existsSync(path.join(sub, '.bubo')))
 })
 
 test('unknown hook events are ignored', async () => {

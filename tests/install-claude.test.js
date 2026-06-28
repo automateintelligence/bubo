@@ -17,13 +17,14 @@ test('installClaude scaffolds hooks for the passive review surface', () => {
   const result = installClaude(root, { repoRoot: REPO_ROOT })
 
   const settings = readJson(result.settingsPath)
-  for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse']) {
+  for (const event of ['SessionStart', 'UserPromptSubmit', 'PostToolUse', 'PostToolUseFailure']) {
     assert.ok(Array.isArray(settings.hooks[event]), `${event} hook registered`)
     const command = settings.hooks[event][0].hooks[0].command
     assert.match(command, /claude-hook\.js/)
   }
 
   assert.equal(settings.hooks.PostToolUse[0].matcher, 'Bash')
+  assert.equal(settings.hooks.PostToolUseFailure[0].matcher, 'Bash')
 })
 
 test('installClaude writes a native /bubo slash command bound to the CLI', () => {

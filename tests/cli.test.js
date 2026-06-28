@@ -159,6 +159,24 @@ test('session stop disables Bubo and session start re-enables it', () => {
   assert.match(statusOn.stdout, /enabled/i)
 })
 
+test('bare start/stop/status map to session controls (as the /bubo slash command expands them)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-controls-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+  const run = (cmd) => spawnSync('node', [cli, cmd, '--project', root], { encoding: 'utf8' })
+
+  const stop = run('stop')
+  const statusOff = run('status')
+  const start = run('start')
+  const statusOn = run('status')
+
+  for (const r of [stop, statusOff, start, statusOn]) assert.equal(r.status, 0)
+  assert.match(stop.stdout, /disabled/i)
+  assert.match(statusOff.stdout, /disabled/i)
+  assert.match(start.stdout, /enabled/i)
+  assert.match(statusOn.stdout, /enabled/i)
+})
+
 test('implement hyphen alias promotes review by ID', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-implement-alias-'))
   const repoRoot = path.resolve(__dirname, '..')
