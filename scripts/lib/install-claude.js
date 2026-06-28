@@ -43,7 +43,7 @@ allowed-tools: Bash(node *)
 
 Bubo is a passive review companion. Run the project CLI and act on its output.
 
-!\`node "${cliPath}" $ARGUMENTS --project "$CLAUDE_PROJECT_DIR"\`
+!\`node "${cliPath}" $ARGUMENTS --project "\${CLAUDE_PROJECT_DIR:-$PWD}"\`
 
 How to act on the output above:
 

@@ -4,6 +4,31 @@ const { spawnSync } = require('node:child_process')
 const fs = require('node:fs')
 const os = require('node:os')
 const path = require('node:path')
+const { execSync } = require('node:child_process')
+
+const { parseArgs } = require('../scripts/cli')
+
+test('parseArgs treats an empty-string value as a value, not a boolean flag', () => {
+  // The /bubo slash command expands to `... status --project ""` when
+  // $CLAUDE_PROJECT_DIR is empty; project must stay a string so resolveProjectRoot
+  // does not receive `true`.
+  const { positionals, options } = parseArgs(['status', '--project', ''])
+  assert.deepEqual(positionals, ['status'])
+  assert.equal(options.project, '')
+})
+
+test('status with an empty --project falls back to cwd instead of crashing', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-empty-project-'))
+  execSync(`git -C "${root}" init -q`)
+  const cli = path.join(path.resolve(__dirname, '..'), 'scripts/cli.js')
+
+  // Mirrors the slash command with an empty env var, run from the project dir.
+  const result = spawnSync('node', [cli, 'status', '--project', ''], { cwd: root, encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /enabled/i)
+  assert.equal(result.stderr, '')
+})
 
 test('review command prints compact inline note and writes project-scoped log', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-'))

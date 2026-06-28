@@ -25,7 +25,11 @@ function parseArgs(argv) {
 
     const key = token.slice(2)
     const next = argv[index + 1]
-    if (!next || next.startsWith('--')) {
+    // An empty string is a real value (e.g. `--project ""` when an env var is
+    // unset), so only treat a genuinely absent or flag-shaped next token as a
+    // boolean. Otherwise `--project ""` would become `project: true` and crash
+    // path resolution.
+    if (next === undefined || next.startsWith('--')) {
       options[key] = true
       continue
     }

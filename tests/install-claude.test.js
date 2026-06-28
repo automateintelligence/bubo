@@ -36,6 +36,8 @@ test('installClaude writes a native /bubo slash command bound to the CLI', () =>
   assert.match(command, /description:/)
   assert.match(command, /cli\.js/)
   assert.match(command, /\$ARGUMENTS/)
+  // Falls back to $PWD so an unset CLAUDE_PROJECT_DIR never yields --project "".
+  assert.match(command, /\$\{CLAUDE_PROJECT_DIR:-\$PWD\}/)
 })
 
 test('installClaude is idempotent and preserves existing settings', () => {
