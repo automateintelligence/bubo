@@ -5,7 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { handleHookEvent, classifyToolEvent } = require('../scripts/lib/claude-hook')
-const { readReviews, readState, writeState, ensureProjectState } = require('../scripts/lib/store')
+const { readConfig, readReviews, readState, writeState, ensureProjectState } = require('../scripts/lib/store')
 
 function tmpProject(label) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), `bubo-claude-${label}-`))
@@ -113,21 +113,30 @@ test('classifyToolEvent maps failure signals to trigger reasons', () => {
 
 test('UserPromptSubmit injects an open-ended reflection nudge on the slow cadence', async () => {
   const root = tmpProject('reflect')
-  // No diff, so the heuristic path stays silent; only the reflection cadence
-  // can speak. It is due on a fresh project.
-  const out = await handleHookEvent(
-    { hook_event_name: 'UserPromptSubmit', cwd: root, prompt: 'continue' },
-    noDeps(root, { now: () => 9_000_000 })
-  )
+  const reflectMs = readConfig(root).cooldowns.reflectMs
+  const start = 9_000_000
 
-  assert.equal(out.hookSpecificOutput.hookEventName, 'UserPromptSubmit')
-  assert.match(out.hookSpecificOutput.additionalContext, /record-review/)
+  // First prompt of a fresh project: no diff and the reflection clock is only
+  // just starting, so Bubo stays quiet rather than piping up right away.
+  const first = await handleHookEvent(
+    { hook_event_name: 'UserPromptSubmit', cwd: root, prompt: 'continue' },
+    noDeps(root, { now: () => start })
+  )
+  assert.equal(first, null)
+
+  // A full window later, the open-ended model-review nudge fires.
+  const due = await handleHookEvent(
+    { hook_event_name: 'UserPromptSubmit', cwd: root, prompt: 'continue' },
+    noDeps(root, { now: () => start + reflectMs + 1 })
+  )
+  assert.equal(due.hookSpecificOutput.hookEventName, 'UserPromptSubmit')
+  assert.match(due.hookSpecificOutput.additionalContext, /record-review/)
   assert.equal(readReviews(root).length, 0) // the model authors it, not the heuristic
 
   // It does not fire again on the very next prompt.
   const again = await handleHookEvent(
     { hook_event_name: 'UserPromptSubmit', cwd: root, prompt: 'and again' },
-    noDeps(root, { now: () => 9_000_000 + 1000 })
+    noDeps(root, { now: () => start + reflectMs + 2000 })
   )
   assert.equal(again, null)
 })

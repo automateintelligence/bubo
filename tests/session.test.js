@@ -99,15 +99,18 @@ test('dedup suppresses a note whose problem matches a recent one', async () => {
   assert.equal(readReviews(root).length, 1)
 })
 
-test('reflection cadence is due on a fresh project and resets after it fires', () => {
+test('reflection cadence does not fire immediately — the first check starts the clock', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-reflect-'))
   const reflectMs = readConfig(root).cooldowns.reflectMs
   const start = 9_000_000
 
-  assert.equal(dueForReflection(root, start), true)
-  markReflection(root, start)
+  // A brand-new project must not pipe up on the first prompt.
+  assert.equal(dueForReflection(root, start), false)
   assert.equal(dueForReflection(root, start + 1000), false)
+  // It becomes due one full window after the clock started.
   assert.equal(dueForReflection(root, start + reflectMs + 1), true)
+  markReflection(root, start + reflectMs + 1)
+  assert.equal(dueForReflection(root, start + reflectMs + 2000), false)
 })
 
 test('reflection cadence stays silent while Bubo is disabled', () => {

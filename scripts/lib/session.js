@@ -123,7 +123,14 @@ function dueForReflection(projectRoot, now = Date.now()) {
   ensureProjectState(projectRoot)
   if (readState(projectRoot).enabled === false) return false
   const config = readConfig(projectRoot)
-  const last = readState(projectRoot).lastTriggerAt?.reflect || 0
+  const last = readState(projectRoot).lastTriggerAt?.reflect
+  if (!last) {
+    // First encounter: start the clock instead of firing. A brand-new project
+    // should not get a reflection nudge on its very first prompt; the first one
+    // arrives a full window later.
+    markReflection(projectRoot, now)
+    return false
+  }
   return now - last >= (config.cooldowns.reflectMs || 900000)
 }
 
