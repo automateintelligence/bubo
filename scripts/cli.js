@@ -10,6 +10,7 @@ const { resolveProjectRoot } = require('./lib/project')
 const { createReview, ensureProjectState, readConfig, readReviews, readState, writeState } = require('./lib/store')
 const { considerReview, promoteReview } = require('./lib/promote')
 const { shouldTriggerReview } = require('./lib/trigger')
+const { installClaude } = require('./lib/install-claude')
 
 function parseArgs(argv) {
   const positionals = []
@@ -51,6 +52,13 @@ function normalizeCommand(positionals) {
   const implementMatch = /^implement-(\d+)$/.exec(command || '')
   if (implementMatch) {
     return ['implement', implementMatch[1], ...rest]
+  }
+
+  // Bare session controls. The generated /bubo slash command expands
+  // `/bubo stop` to `cli.js stop ...`, so accept start/stop/status directly
+  // and route them to the session handler.
+  if (['start', 'stop', 'status'].includes(command)) {
+    return ['session', command, ...rest]
   }
 
   return positionals
@@ -246,6 +254,46 @@ function runRecord(options) {
   })
 }
 
+function runInstallClaude(options) {
+  const projectRoot = resolveProjectRoot(options.project || process.cwd())
+  const { settingsPath, commandPath } = installClaude(projectRoot)
+  process.stdout.write('Installed Bubo for Claude Code.\n')
+  process.stdout.write(`Hooks: ${settingsPath}\n`)
+  process.stdout.write(`Slash command: ${commandPath}\n`)
+  return 0
+}
+
+function onPath(binary) {
+  try {
+    return execSync(`command -v ${binary}`, { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() !== ''
+  } catch {
+    return false
+  }
+}
+
+// One command to set up whichever host(s) are present. Claude Code needs
+// per-project hook + command files; Codex needs only the launcher wrapper, so
+// for Codex we print the shell alias rather than writing into the project.
+function runInstall(options) {
+  const repoRoot = path.resolve(__dirname, '..')
+  const projectRoot = resolveProjectRoot(options.project || process.cwd())
+  const hasClaude = onPath('claude')
+  const hasCodex = onPath('codex')
+
+  const { settingsPath, commandPath } = installClaude(projectRoot)
+  process.stdout.write('Bubo install\n')
+  process.stdout.write('============\n\n')
+  process.stdout.write(`Claude Code${hasClaude ? ' (detected)' : ''}: hooks + native /bubo command installed.\n`)
+  process.stdout.write(`  Hooks:         ${settingsPath}\n`)
+  process.stdout.write(`  Slash command: ${commandPath}\n`)
+  process.stdout.write('  Start any Claude Code session in this project and Bubo is live.\n\n')
+
+  process.stdout.write(`Codex${hasCodex ? ' (detected)' : ''}: no per-project files needed — launch through the wrapper.\n`)
+  process.stdout.write('  Add this shell alias, then use `codex-bubo`:\n\n')
+  process.stdout.write(`    codex-bubo() { "${path.join(repoRoot, 'scripts', 'bubo-codex')}" --no-alt-screen "$@"; }\n`)
+  return 0
+}
+
 async function main(argv) {
   const parsed = parseArgs(argv)
   const positionals = normalizeCommand(parsed.positionals)
@@ -270,6 +318,14 @@ async function main(argv) {
 
   if (command === 'session') {
     return runSession(positionals, options)
+  }
+
+  if (command === 'install') {
+    return runInstall(options)
+  }
+
+  if (command === 'install-claude') {
+    return runInstallClaude(options)
   }
 
   throw new Error(`Unknown command: ${command}`)

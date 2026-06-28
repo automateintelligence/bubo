@@ -159,6 +159,24 @@ test('session stop disables Bubo and session start re-enables it', () => {
   assert.match(statusOn.stdout, /enabled/i)
 })
 
+test('bare start/stop/status map to session controls (as the /bubo slash command expands them)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-controls-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+  const run = (cmd) => spawnSync('node', [cli, cmd, '--project', root], { encoding: 'utf8' })
+
+  const stop = run('stop')
+  const statusOff = run('status')
+  const start = run('start')
+  const statusOn = run('status')
+
+  for (const r of [stop, statusOff, start, statusOn]) assert.equal(r.status, 0)
+  assert.match(stop.stdout, /disabled/i)
+  assert.match(statusOff.stdout, /disabled/i)
+  assert.match(start.stdout, /enabled/i)
+  assert.match(statusOn.stdout, /enabled/i)
+})
+
 test('implement hyphen alias promotes review by ID', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-implement-alias-'))
   const repoRoot = path.resolve(__dirname, '..')
@@ -278,6 +296,70 @@ test('consider hyphen alias resolves the same review by ID', () => {
   assert.equal(result.status, 0)
   assert.match(result.stdout, /Consider Bubo review 1\./)
   assert.match(result.stdout, /\$receiving-code-review/)
+})
+
+test('install-claude scaffolds hooks and a slash command into the project', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+
+  const result = spawnSync('node', [cli, 'install-claude', '--project', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /Installed Bubo for Claude Code/)
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'settings.json')))
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
+})
+
+test('install sets up the detected host(s) in one command', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install1-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+
+  const result = spawnSync('node', [cli, 'install', '--project', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  // Claude side is scaffolded into the project...
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'settings.json')))
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
+  // ...and the Codex side is explained (no per-project files, just the wrapper).
+  assert.match(result.stdout, /Claude Code/)
+  assert.match(result.stdout, /Codex/)
+  assert.match(result.stdout, /bubo-codex/)
+})
+
+test('claude-hook entrypoint injects a passive note from a UserPromptSubmit event', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-hook-e2e-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const hook = path.join(repoRoot, 'scripts/claude-hook.js')
+
+  const event = JSON.stringify({
+    hook_event_name: 'UserPromptSubmit',
+    cwd: root,
+    prompt: 'continue'
+  })
+
+  // No diff in this throwaway dir, so seed evidence through the tool-output path
+  // by driving a PostToolUse failure event instead.
+  const failEvent = JSON.stringify({
+    hook_event_name: 'PostToolUse',
+    cwd: root,
+    tool_name: 'Bash',
+    tool_input: { command: 'npm test' },
+    tool_output: 'FAIL: AssertionError: expected 1 received 0',
+    tool_exit_code: 1
+  })
+
+  const result = spawnSync('node', [hook], { encoding: 'utf8', input: failEvent })
+  assert.equal(result.status, 0)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.hookSpecificOutput.hookEventName, 'PostToolUse')
+  assert.match(payload.hookSpecificOutput.additionalContext, /Bubo Says \[1\]:/)
+  assert.ok(fs.existsSync(path.join(root, '.bubo', 'reviews.jsonl')))
+
+  // A benign event produces no output and a clean exit.
+  const benign = spawnSync('node', [hook], { encoding: 'utf8', input: event })
+  assert.equal(benign.status, 0)
 })
 
 test('consider last resolves the most recent review in the current project without promoting it', () => {

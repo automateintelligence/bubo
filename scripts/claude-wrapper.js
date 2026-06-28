@@ -48,10 +48,20 @@ function parseArgs(argv) {
   return options
 }
 
-function buildLaunchSpec({ projectRoot, review, forwardedArgs, prompt }) {
+// Claude Code takes its working directory from the process cwd (no `-C` flag),
+// and Bubo's startup context rides in via --append-system-prompt so it stays
+// out of the visible conversation. Any explicit user prompt is the trailing
+// positional argument.
+function buildLaunchSpec({ projectRoot, review, forwardedArgs = [], prompt }) {
+  const args = [...forwardedArgs, '--append-system-prompt', buildStartupPrompt({ review, host: 'claude' })]
+  if (prompt) {
+    args.push(prompt)
+  }
+
   return {
-    command: 'codex',
-    args: ['-C', projectRoot, ...forwardedArgs, buildStartupPrompt({ review, prompt, host: 'codex' })]
+    command: 'claude',
+    cwd: projectRoot,
+    args
   }
 }
 
@@ -79,7 +89,7 @@ async function main(argv) {
     return 0
   }
 
-  const result = spawnSync(spec.command, spec.args, { stdio: 'inherit' })
+  const result = spawnSync(spec.command, spec.args, { stdio: 'inherit', cwd: spec.cwd })
   return result.status || 0
 }
 
@@ -92,4 +102,4 @@ if (require.main === module) {
     })
 }
 
-module.exports = { buildLaunchSpec, buildStartupPrompt, createStartReview, parseArgs }
+module.exports = { buildLaunchSpec, parseArgs }

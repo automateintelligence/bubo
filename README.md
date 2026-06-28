@@ -1,6 +1,8 @@
 # Bubo
 
-Bubo is a passive code review companion for Codex sessions. The idea is simple: while you work, Bubo occasionally mutters one short, pointed observation about something likely to break, drift, or confuse. The note is context only. It does not become work until you explicitly promote it.
+Bubo is a passive code review companion for Codex **and Claude Code** sessions. The idea is simple: while you work, Bubo occasionally mutters one short, pointed observation about something likely to break, drift, or confuse. The note is context only. It does not become work until you explicitly promote it.
+
+Both hosts run on the same shared core and the same project-scoped `.bubo/` store. Only the integration surface differs: Codex gets the skill injected into its startup prompt by a launcher wrapper, while Claude Code uses native hooks and a native `/bubo` slash command.
 
 He is also, by design, a character. Bubo is an ancient golden war-owl: precise, patient, mildly amused by avoidable chaos, and prone to clipped verdicts like he already watched this bug ruin Argos once. Just as he once helped Perseus, he is now here to guide you. 
 
@@ -11,15 +13,16 @@ If you only need the practical version: Bubo stores project-scoped review notes 
 Bubo has two layers:
 
 - The CLI layer runs on Node.js and can be used directly from this repo.
-- The interactive live-review workflow depends on Codex plus oh-my-codex (OMX). The launcher wrapper injects the repo-local `bubo-live-review` skill into the Codex session at startup.
+- The interactive live-review workflow runs on a host:
+  - **Codex** plus oh-my-codex (OMX). The `bubo-codex` launcher injects the repo-local `bubo-live-review` skill into the Codex session at startup.
+  - **Claude Code**. `bubo install-claude` registers project hooks (SessionStart, UserPromptSubmit, PostToolUse) that inject passive notes automatically, plus a native `/bubo` slash command. No launcher wrapper is required, though `bubo-claude` is provided for parity.
 
 In practice, if you want the full experience, assume you need:
 
 - Node.js
-- Codex CLI
-- oh-my-codex (OMX)
+- One host: the Codex CLI (with OMX) and/or Claude Code
 
-There is no `package.json` install flow in this repo. The entrypoints are the checked-in scripts under [`scripts/`](/home/danie906/bubo/scripts).
+There is no `package.json` install flow in this repo. The entrypoints are the checked-in scripts under [`scripts/`](./scripts).
 
 ## Installation
 
@@ -75,9 +78,47 @@ You can also force a fresh startup review into the launch context:
 ```bash
 codex-bubo --reason manual --diff-text 'const draft = { alert_id: 0 }'
 ```
+### One-command install
+
+From inside the project you want Bubo to watch:
+
+```bash
+node scripts/cli.js install --project "$(pwd)"
+```
+
+This detects which hosts you have, scaffolds the Claude Code integration into the project, and prints the Codex shell-alias snippet. Use it if you just want Bubo running with no further reading.
+
+### Launch Claude Code with Bubo
+
+Claude Code integrates through native hooks rather than a startup prompt. `bubo install` (above) does this for you, or you can target Claude explicitly:
+
+```bash
+node scripts/cli.js install-claude --project "$(pwd)"
+```
+
+This writes:
+
+- `.claude/settings.json` — `SessionStart`, `UserPromptSubmit`, `PostToolUse`, and `PostToolUseFailure` hooks that call `scripts/claude-hook.js`. The hook reads the event JSON on stdin and, when a review fires, injects the passive note into the session via `hookSpecificOutput.additionalContext`. It stays silent and exits cleanly when nothing fires, so it never disrupts the session.
+- `.claude/commands/bubo.md` — a native `/bubo` slash command. `/bubo review`, `/bubo consider <id>`, `/bubo implement <id>`, `/bubo start`, `/bubo stop`, and `/bubo status` all work.
+
+The install is idempotent and merges into any existing `.claude/settings.json` without clobbering unrelated hooks.
+
+Trigger mapping on Claude Code:
+
+- `SessionStart` injects the live-review skill and the latest stored note as context.
+- `UserPromptSubmit` runs a passive `turn` review against the working diff (subject to cooldown and the per-project enable flag), surfacing at most one fresh note per turn.
+- `PostToolUse` / `PostToolUseFailure` (Bash) classify failing output into a `test-fail` or `error` review so Bubo speaks up exactly when something just broke. Failed commands fire `PostToolUseFailure`, so both are registered.
+- On a slow cadence, `UserPromptSubmit` also injects an open-ended model-review nudge (Path B) so Bubo periodically reviews with judgment, not just patterns.
+
+A convenience launcher is also available if you prefer to start sessions through a wrapper:
+
+```bash
+./scripts/bubo-claude
+```
+
 ### Control Bubo inside a Codex session
 
-When Bubo is active in-session, use plain commands in chat. Do not prefix them with `/`.
+When Bubo is active in-session, use plain commands in chat. On Codex, do not prefix them with `/` (Codex reserves slash commands). On Claude Code, the same commands also work as native slash commands (`/bubo review`, `/bubo implement <id>`, …).
 
 - `bubo review` or `bubo review-code` generates a review immediately
 - `bubo consider <id>` or `bubo consider-<id>` evaluates a stored review before implementation
@@ -103,7 +144,14 @@ Each review record can contain:
 
 The live-review skill keeps those notes inert by default. A Bubo note is not a task. It becomes actionable only when you explicitly promote it with `bubo implement <id>`.
 
-The current default provider is heuristic. Out of the box, Bubo knows how to notice a few specific messes, such as fixed sentinel IDs, swallowed exceptions, `@ts-ignore` suppression, large diffs, and obvious recent failures in visible tool output.
+### Two ways a note is generated
+
+Bubo has two independent generators that write into the same store:
+
+- **Heuristics (Path A, default, fast).** Pure pattern matching over the *added* lines of your diff — no model call. The curated catalog covers, in priority order: hardcoded secrets and private keys, `eval`/`exec` on dynamic input, string-built SQL (injection), `Math.random` for security values, destructive shell (`rm -rf`, force-push, pipe-to-shell), sentinel IDs, focused/skipped tests (`.only`, `.skip`, `fit`), left-in debuggers (`debugger`, `pdb.set_trace`, `pry`), checker suppression (`@ts-ignore`, `eslint-disable`, `# type: ignore`, `@SuppressWarnings`), `as any` / `as unknown as` escape hatches, empty `catch {}`, oversized diffs, `FIXME`/`XXX`/`HACK` markers, and failure signals in tool output. Scanning is scoped to added lines, so removing risky code never trips a note.
+- **Model review (Path B, occasional, deeper).** On a long cooldown (default 15 minutes) Bubo asks the host model to perform one open-ended review of recent work — design risk, drift, subtle correctness — the kind of judgment regex can't express, persisted with `record-review`. This is governed by the `bubo-live-review` skill, not the heuristics.
+
+Near-duplicate notes are suppressed: if a fresh observation matches one Bubo already made recently, it stays quiet (an explicit `bubo review` is never suppressed). The working diff is read lazily and at most once per cooldown window, so passive review adds no per-prompt git cost during an editing burst.
 
 ### Use the CLI directly
 

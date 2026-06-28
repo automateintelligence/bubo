@@ -3,6 +3,60 @@ const assert = require('node:assert/strict')
 
 const { generateReview } = require('../scripts/lib/generate')
 
+const HEURISTIC = { provider: { kind: 'heuristic' } }
+
+function review(diffExcerpt, extra = {}) {
+  return generateReview({
+    reason: 'turn',
+    diffExcerpt,
+    toolOutputExcerpt: '',
+    recentTurns: [],
+    changedFiles: [],
+    ...extra
+  }, HEURISTIC)
+}
+
+const CASES = [
+  { label: 'hardcoded secret', diff: '+ const apiKey = "sk_live_ab12cd34ef56gh78ij90"', match: /secret|credential|key/i },
+  { label: 'aws access key', diff: '+ AWS_ACCESS_KEY_ID = "AKIAIOSFODNN7EXAMPLE"', match: /secret|credential|key/i },
+  { label: 'eval on input', diff: '+ const result = eval(userInput)', match: /eval|execut/i },
+  { label: 'dynamic sql', diff: '+ db.query("SELECT * FROM users WHERE id = " + id)', match: /sql|inject|parameter/i },
+  { label: 'insecure randomness', diff: '+ const token = Math.random().toString(36)', match: /random|predictable|csprng/i },
+  { label: 'dangerous shell', diff: '+\trm -rf node_modules dist', match: /rm -rf|destructive|irreversible/i },
+  { label: 'focused test', diff: '+ describe.only("auth", () => {})', match: /focus|only|suite/i },
+  { label: 'left-in debugger', diff: '+   debugger', match: /debug|breakpoint|left in/i },
+  { label: 'lint suppression', diff: '+ x = y  # type: ignore', match: /suppress|silenc|checker|lint/i },
+  { label: 'as any escape hatch', diff: '+ const u = payload as any', match: /any|type|escape|boundary/i },
+  { label: 'fixme marker', diff: '+ // FIXME: handle the null case', match: /fixme|unfinished|debt/i }
+]
+
+for (const item of CASES) {
+  test(`generator flags ${item.label}`, async () => {
+    const result = await review(item.diff)
+    assert.ok(result, `expected a review for ${item.label}`)
+    const haystack = `${result.problem} ${result.evidence} ${result.solution} ${result.rendered}`
+    assert.match(haystack, item.match)
+  })
+}
+
+test('generator scans only added lines, ignoring removed code', async () => {
+  // The secret is on a removed (-) line, so it must not trigger a finding.
+  const result = await review('- const apiKey = "sk_live_ab12cd34ef56gh78ij90"\n+ const apiKey = readKey()')
+  assert.equal(result, null)
+})
+
+test('generator prioritizes a security finding over a hygiene finding', async () => {
+  const result = await review('+ const apiKey = "sk_live_ab12cd34ef56gh78ij90"\n+ // FIXME: rotate this')
+  assert.match(`${result.problem} ${result.rendered}`, /secret|credential|key/i)
+})
+
+test('generator prioritizes a security finding over a correctness finding', async () => {
+  // A diff carrying both a hardcoded secret and a sentinel id must surface the
+  // higher-severity security issue first.
+  const result = await review('+ const draft = { alert_id: 0 }\n+ const apiKey = "sk_live_ab12cd34ef56gh78ij90"')
+  assert.match(`${result.problem} ${result.rendered}`, /secret|credential|key/i)
+})
+
 test('generator emits a sentinel-id collision review from diff evidence', async () => {
   const review = await generateReview({
     reason: 'large-diff',
