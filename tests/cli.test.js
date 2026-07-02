@@ -184,6 +184,20 @@ test('session stop disables Bubo and session start re-enables it', () => {
   assert.match(statusOn.stdout, /enabled/i)
 })
 
+test('no command at all defaults to session status (bare /bubo on any host)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-default-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+
+  // Bare `/bubo` expands with an empty $ARGUMENTS on both hosts, so the CLI
+  // receives only --project. That must behave like `status`, not crash.
+  const result = spawnSync('node', [cli, '--project', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /Bubo session is enabled/)
+  assert.equal(result.stderr, '')
+})
+
 test('bare start/stop/status map to session controls (as the /bubo slash command expands them)', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-controls-'))
   const repoRoot = path.resolve(__dirname, '..')
@@ -338,19 +352,43 @@ test('install-claude scaffolds hooks and a slash command into the project', () =
 
 test('install sets up the detected host(s) in one command', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install1-'))
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-codexhome-'))
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
-  const result = spawnSync('node', [cli, 'install', '--project', root], { encoding: 'utf8' })
+  // CODEX_HOME keeps the test from touching the developer's real ~/.codex.
+  const result = spawnSync('node', [cli, 'install', '--project', root], {
+    encoding: 'utf8',
+    env: { ...process.env, CODEX_HOME: codexHome }
+  })
 
   assert.equal(result.status, 0)
   // Claude side is scaffolded into the project...
   assert.ok(fs.existsSync(path.join(root, '.claude', 'settings.json')))
   assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
-  // ...and the Codex side is explained (no per-project files, just the wrapper).
+  // ...and the Codex side gets a per-user /bubo custom prompt plus the wrapper alias.
   assert.match(result.stdout, /Claude Code/)
   assert.match(result.stdout, /Codex/)
   assert.match(result.stdout, /bubo-codex/)
+  assert.ok(fs.existsSync(path.join(codexHome, 'prompts', 'bubo.md')))
+})
+
+test('install survives an unwritable CODEX_HOME and still completes the Claude side', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install-ro-'))
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-codexro-'))
+  fs.chmodSync(codexHome, 0o500) // exists but not writable
+
+  const result = spawnSync('node', [path.join(path.resolve(__dirname, '..'), 'scripts/cli.js'), 'install', '--project', root], {
+    encoding: 'utf8',
+    env: { ...process.env, CODEX_HOME: codexHome }
+  })
+
+  fs.chmodSync(codexHome, 0o700) // restore so tmp cleanup works
+
+  assert.equal(result.status, 0)
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
+  assert.match(result.stdout, /could not install the \/bubo custom prompt/)
+  assert.match(result.stdout, /install-codex/)
 })
 
 test('claude-hook entrypoint injects a passive note from a UserPromptSubmit event', () => {
