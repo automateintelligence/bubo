@@ -36,8 +36,10 @@ test('installClaude writes a native /bubo slash command bound to the CLI', () =>
   assert.match(command, /description:/)
   assert.match(command, /cli\.js/)
   assert.match(command, /\$ARGUMENTS/)
-  // Falls back to $PWD so an unset CLAUDE_PROJECT_DIR never yields --project "".
-  assert.match(command, /\$\{CLAUDE_PROJECT_DIR:-\$PWD\}/)
+  assert.match(command, /--project "\$PWD"/)
+  // No auto-executed !`...` line: textual $ARGUMENTS substitution into a shell
+  // line is a shell-injection channel. The model runs the CLI as a tool call.
+  assert.doesNotMatch(command, /^!`/m)
 })
 
 test('installClaude is idempotent and preserves existing settings', () => {

@@ -39,8 +39,10 @@ test('plugin /bubo command mirrors the per-project command via CLAUDE_PLUGIN_ROO
   assert.match(command, /description:/)
   assert.match(command, /\$\{CLAUDE_PLUGIN_ROOT\}\/scripts\/cli\.js/)
   assert.match(command, /\$ARGUMENTS/)
-  // Same empty-env fallback the per-project command uses.
-  assert.match(command, /\$\{CLAUDE_PROJECT_DIR:-\$PWD\}/)
+  assert.match(command, /--project "\$PWD"/)
+  // No auto-executed !`...` line: textual $ARGUMENTS substitution into a shell
+  // line is a shell-injection channel. The model runs the CLI as a tool call.
+  assert.doesNotMatch(command, /^!`/m)
 })
 
 test('plugin ships the live-review skill where Claude Code auto-discovers it', () => {
