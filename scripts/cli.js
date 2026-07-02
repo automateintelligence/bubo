@@ -302,9 +302,16 @@ function runInstall(options) {
   process.stdout.write(`Codex${hasCodex ? ' (detected)' : ''}: `)
   const codexHome = resolveCodexHome()
   if (hasCodex || fs.existsSync(codexHome)) {
-    const { promptPath } = installCodexPrompt({ repoRoot, codexHome })
-    process.stdout.write('native /bubo custom prompt installed (per-user, works in every project).\n')
-    process.stdout.write(`  Slash command: ${promptPath}\n`)
+    // A read-only Codex home must not fail the whole install after the Claude
+    // files are already in place — report and continue instead.
+    try {
+      const { promptPath } = installCodexPrompt({ repoRoot, codexHome })
+      process.stdout.write('native /bubo custom prompt installed (per-user, works in every project).\n')
+      process.stdout.write(`  Slash command: ${promptPath}\n`)
+    } catch (error) {
+      process.stdout.write(`could not install the /bubo custom prompt (${error.message}).\n`)
+      process.stdout.write(`  Retry manually: node "${path.join(repoRoot, 'scripts', 'cli.js')}" install-codex\n`)
+    }
   } else {
     process.stdout.write('not detected — skipped the /bubo custom prompt.\n')
   }

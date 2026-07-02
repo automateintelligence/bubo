@@ -373,6 +373,24 @@ test('install sets up the detected host(s) in one command', () => {
   assert.ok(fs.existsSync(path.join(codexHome, 'prompts', 'bubo.md')))
 })
 
+test('install survives an unwritable CODEX_HOME and still completes the Claude side', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install-ro-'))
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-codexro-'))
+  fs.chmodSync(codexHome, 0o500) // exists but not writable
+
+  const result = spawnSync('node', [path.join(path.resolve(__dirname, '..'), 'scripts/cli.js'), 'install', '--project', root], {
+    encoding: 'utf8',
+    env: { ...process.env, CODEX_HOME: codexHome }
+  })
+
+  fs.chmodSync(codexHome, 0o700) // restore so tmp cleanup works
+
+  assert.equal(result.status, 0)
+  assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
+  assert.match(result.stdout, /could not install the \/bubo custom prompt/)
+  assert.match(result.stdout, /install-codex/)
+})
+
 test('claude-hook entrypoint injects a passive note from a UserPromptSubmit event', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-hook-e2e-'))
   const repoRoot = path.resolve(__dirname, '..')
