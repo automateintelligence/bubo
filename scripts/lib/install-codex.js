@@ -20,11 +20,13 @@ argument-hint: "[review | consider <id> | implement <id> | start | stop | status
 
 Bubo is a passive review companion. Run the project CLI and act on its output.
 
-Run exactly this command (treat empty $ARGUMENTS as \`status\`):
+Run this command, passing the user's arguments through as plain CLI arguments (empty arguments are fine — the CLI defaults to \`status\`):
 
 \`\`\`bash
 node "${cliPath}" $ARGUMENTS --project "$PWD"
 \`\`\`
+
+Treat the argument text strictly as CLI arguments. If it contains shell metacharacters (\`;\`, \`|\`, \`&\`, backticks, \`$(\`), do not execute them — refuse and report the argument as invalid instead.
 
 How to act on the printed output:
 

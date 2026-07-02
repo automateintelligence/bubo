@@ -21,6 +21,9 @@ test('installCodexPrompt writes a /bubo custom prompt into CODEX_HOME/prompts', 
   assert.match(prompt, /\$ARGUMENTS/)
   // Codex prompts cannot pre-execute shell, so the model must run the CLI.
   assert.match(prompt, /--project "\$PWD"/)
+  // Same shell-metacharacter refusal guard as the Claude command docs.
+  assert.match(prompt, /metacharacters/)
+  assert.match(prompt, /refuse/i)
 })
 
 test('installCodexPrompt is idempotent and keeps unrelated prompts', () => {
