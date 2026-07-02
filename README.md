@@ -37,6 +37,8 @@ Bubo is a standalone plugin in the [automateintelligence marketplace](https://gi
 
 The plugin carries the hooks, the `/bubo` slash command, and the `bubo-live-review` skill, with no per-project setup. At install Claude Code asks for a scope: **user** (all your projects), **project** (all collaborators on one repo), or **local** (just you, one repo) — pick user scope for passive review everywhere, or local to confine it. Use `/bubo stop` in any project where you want Bubo quiet (state is per project, stored in `.bubo/`; notes never cross projects). You may want to add `.bubo/` to your global gitignore.
 
+The plugin covers **Claude Code only**. Codex cannot consume Claude Code plugins, and the plugin's cache directory is ephemeral (its path changes on every update), so the Codex integration must not point at it. If you use Codex — with or without the plugin — set it up from a clone as described below.
+
 ### From a clone
 
 Clone the repo somewhere stable.  Recommend user home, because Bubo works with Codex and Claude.
