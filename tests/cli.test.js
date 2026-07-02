@@ -184,6 +184,20 @@ test('session stop disables Bubo and session start re-enables it', () => {
   assert.match(statusOn.stdout, /enabled/i)
 })
 
+test('no command at all defaults to session status (bare /bubo on any host)', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-default-'))
+  const repoRoot = path.resolve(__dirname, '..')
+  const cli = path.join(repoRoot, 'scripts/cli.js')
+
+  // Bare `/bubo` expands with an empty $ARGUMENTS on both hosts, so the CLI
+  // receives only --project. That must behave like `status`, not crash.
+  const result = spawnSync('node', [cli, '--project', root], { encoding: 'utf8' })
+
+  assert.equal(result.status, 0)
+  assert.match(result.stdout, /Bubo session is enabled/)
+  assert.equal(result.stderr, '')
+})
+
 test('bare start/stop/status map to session controls (as the /bubo slash command expands them)', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-controls-'))
   const repoRoot = path.resolve(__dirname, '..')

@@ -45,6 +45,12 @@ function parseArgs(argv) {
 function normalizeCommand(positionals) {
   const [command, ...rest] = positionals
 
+  // Bare `/bubo` expands with an empty $ARGUMENTS on every host, so the CLI
+  // sees no command at all. Default to the status report instead of erroring.
+  if (command === undefined) {
+    return ['session', 'status']
+  }
+
   if (command === 'review') {
     return ['review-code', ...rest]
   }
