@@ -35,7 +35,7 @@ Bubo is a standalone plugin in the [automateintelligence marketplace](https://gi
 /plugin install bubo@automateintelligence
 ```
 
-The plugin carries the hooks, the `/bubo` slash command, and the `bubo-live-review` skill, so every project you open gets passive review with no per-project setup. Use `/bubo stop` in any project where you want Bubo quiet (state is per project, stored in `.bubo/`). You may want to add `.bubo/` to your global gitignore.
+The plugin carries the hooks, the `/bubo` slash command, and the `bubo-live-review` skill, with no per-project setup. At install Claude Code asks for a scope: **user** (all your projects), **project** (all collaborators on one repo), or **local** (just you, one repo) — pick user scope for passive review everywhere, or local to confine it. Use `/bubo stop` in any project where you want Bubo quiet (state is per project, stored in `.bubo/`; notes never cross projects). You may want to add `.bubo/` to your global gitignore.
 
 ### From a clone
 
