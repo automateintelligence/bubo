@@ -338,19 +338,25 @@ test('install-claude scaffolds hooks and a slash command into the project', () =
 
 test('install sets up the detected host(s) in one command', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install1-'))
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-codexhome-'))
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
-  const result = spawnSync('node', [cli, 'install', '--project', root], { encoding: 'utf8' })
+  // CODEX_HOME keeps the test from touching the developer's real ~/.codex.
+  const result = spawnSync('node', [cli, 'install', '--project', root], {
+    encoding: 'utf8',
+    env: { ...process.env, CODEX_HOME: codexHome }
+  })
 
   assert.equal(result.status, 0)
   // Claude side is scaffolded into the project...
   assert.ok(fs.existsSync(path.join(root, '.claude', 'settings.json')))
   assert.ok(fs.existsSync(path.join(root, '.claude', 'commands', 'bubo.md')))
-  // ...and the Codex side is explained (no per-project files, just the wrapper).
+  // ...and the Codex side gets a per-user /bubo custom prompt plus the wrapper alias.
   assert.match(result.stdout, /Claude Code/)
   assert.match(result.stdout, /Codex/)
   assert.match(result.stdout, /bubo-codex/)
+  assert.ok(fs.existsSync(path.join(codexHome, 'prompts', 'bubo.md')))
 })
 
 test('claude-hook entrypoint injects a passive note from a UserPromptSubmit event', () => {

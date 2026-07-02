@@ -11,6 +11,7 @@ const { createReview, ensureProjectState, readConfig, readReviews, readState, wr
 const { considerReview, promoteReview } = require('./lib/promote')
 const { shouldTriggerReview } = require('./lib/trigger')
 const { installClaude } = require('./lib/install-claude')
+const { installCodexPrompt, resolveCodexHome } = require('./lib/install-codex')
 
 function parseArgs(argv) {
   const positionals = []
@@ -276,8 +277,8 @@ function onPath(binary) {
 }
 
 // One command to set up whichever host(s) are present. Claude Code needs
-// per-project hook + command files; Codex needs only the launcher wrapper, so
-// for Codex we print the shell alias rather than writing into the project.
+// per-project hook + command files; Codex gets a per-user /bubo custom prompt
+// (plus the optional launcher wrapper, printed as a shell alias).
 function runInstall(options) {
   const repoRoot = path.resolve(__dirname, '..')
   const projectRoot = resolveProjectRoot(options.project || process.cwd())
@@ -292,9 +293,25 @@ function runInstall(options) {
   process.stdout.write(`  Slash command: ${commandPath}\n`)
   process.stdout.write('  Start any Claude Code session in this project and Bubo is live.\n\n')
 
-  process.stdout.write(`Codex${hasCodex ? ' (detected)' : ''}: no per-project files needed — launch through the wrapper.\n`)
-  process.stdout.write('  Add this shell alias, then use `codex-bubo`:\n\n')
+  process.stdout.write(`Codex${hasCodex ? ' (detected)' : ''}: `)
+  const codexHome = resolveCodexHome()
+  if (hasCodex || fs.existsSync(codexHome)) {
+    const { promptPath } = installCodexPrompt({ repoRoot, codexHome })
+    process.stdout.write('native /bubo custom prompt installed (per-user, works in every project).\n')
+    process.stdout.write(`  Slash command: ${promptPath}\n`)
+  } else {
+    process.stdout.write('not detected — skipped the /bubo custom prompt.\n')
+  }
+  process.stdout.write('  For passive notes at startup, launch through the wrapper. Add this shell alias, then use `codex-bubo`:\n\n')
   process.stdout.write(`    codex-bubo() { "${path.join(repoRoot, 'scripts', 'bubo-codex')}" --no-alt-screen "$@"; }\n`)
+  return 0
+}
+
+function runInstallCodex() {
+  const repoRoot = path.resolve(__dirname, '..')
+  const { promptPath } = installCodexPrompt({ repoRoot })
+  process.stdout.write('Installed the /bubo custom prompt for Codex.\n')
+  process.stdout.write(`Slash command: ${promptPath}\n`)
   return 0
 }
 
@@ -330,6 +347,10 @@ async function main(argv) {
 
   if (command === 'install-claude') {
     return runInstallClaude(options)
+  }
+
+  if (command === 'install-codex') {
+    return runInstallCodex()
   }
 
   throw new Error(`Unknown command: ${command}`)

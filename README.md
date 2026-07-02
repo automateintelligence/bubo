@@ -2,7 +2,7 @@
 
 Bubo is a passive code review companion for Codex **and Claude Code** sessions. The idea is simple: while you work, Bubo occasionally mutters one short, pointed observation about something likely to break, drift, or confuse. The note is context only. It does not become work until you explicitly promote it.
 
-Both hosts run on the same shared core and the same project-scoped `.bubo/` store. Only the integration surface differs: Codex gets the skill injected into its startup prompt by a launcher wrapper, while Claude Code uses native hooks and a native `/bubo` slash command.
+Both hosts run on the same shared core and the same project-scoped `.bubo/` store. Only the integration surface differs: Claude Code uses native hooks and a native `/bubo` slash command (installable per project or as a plugin), while Codex gets a native `/bubo` custom prompt plus an optional launcher wrapper that injects the skill into its startup prompt.
 
 He is also, by design, a character. Bubo is an ancient golden war-owl: precise, patient, mildly amused by avoidable chaos, and prone to clipped verdicts like he already watched this bug ruin Argos once. Just as he once helped Perseus, he is now here to guide you. 
 
@@ -25,6 +25,19 @@ In practice, if you want the full experience, assume you need:
 There is no `package.json` install flow in this repo. The entrypoints are the checked-in scripts under [`scripts/`](./scripts).
 
 ## Installation
+
+### As a Claude Code plugin (marketplace)
+
+Bubo is a standalone plugin in the [automateintelligence marketplace](https://github.com/automateintelligence/marketplace) — it has no dependency on the other plugins there and installs on its own:
+
+```
+/plugin marketplace add automateintelligence/marketplace
+/plugin install bubo@automateintelligence
+```
+
+The plugin carries the hooks, the `/bubo` slash command, and the `bubo-live-review` skill, so every project you open gets passive review with no per-project setup. Use `/bubo stop` in any project where you want Bubo quiet (state is per project, stored in `.bubo/`). You may want to add `.bubo/` to your global gitignore.
+
+### From a clone
 
 Clone the repo somewhere stable.  Recommend user home, because Bubo works with Codex and Claude.
 
@@ -86,7 +99,7 @@ From inside the project you want Bubo to watch:
 node scripts/cli.js install --project "$(pwd)"
 ```
 
-This detects which hosts you have, scaffolds the Claude Code integration into the project, and prints the Codex shell-alias snippet. Use it if you just want Bubo running with no further reading.
+This detects which hosts you have, scaffolds the Claude Code integration into the project, installs the Codex `/bubo` custom prompt (per user, into `$CODEX_HOME/prompts/`, default `~/.codex/prompts/`), and prints the Codex shell-alias snippet. Use it if you just want Bubo running with no further reading.
 
 ### Launch Claude Code with Bubo
 
@@ -118,7 +131,9 @@ A convenience launcher is also available if you prefer to start sessions through
 
 ### Control Bubo inside a Codex session
 
-When Bubo is active in-session, use plain commands in chat. On Codex, do not prefix them with `/` (Codex reserves slash commands). On Claude Code, the same commands also work as native slash commands (`/bubo review`, `/bubo implement <id>`, …).
+`/bubo` works natively in Codex too. `bubo install` (or `node scripts/cli.js install-codex`) writes a custom prompt to `$CODEX_HOME/prompts/bubo.md`, so `/bubo status`, `/bubo review`, `/bubo implement <id>`, … work in every Codex session. Codex custom prompts cannot pre-execute shell commands the way Claude Code slash commands do, so the prompt instructs the model to run the Bubo CLI — same commands, same output, one extra model step.
+
+The bare phrasing still works when the skill is active (e.g. sessions launched through `codex-bubo`): type `bubo review` without the slash and the skill routes it. On Claude Code, the same commands work as native slash commands (`/bubo review`, `/bubo implement <id>`, …).
 
 - `bubo review` or `bubo review-code` generates a review immediately
 - `bubo consider <id>` or `bubo consider-<id>` evaluates a stored review before implementation
