@@ -1,4 +1,4 @@
-const { readReviews, rewriteReviews } = require('./store')
+const { readReviews, rewriteReviews, withLock } = require('./store')
 
 function resolveReviewId(root, id) {
   if (id === 'last') {
@@ -15,16 +15,33 @@ function resolveReviewId(root, id) {
   return Number(id)
 }
 
+function describeCandidate(review) {
+  const rendered = String(review.rendered || '').slice(0, 60)
+  return `  ${review.timestamp || 'unknown time'}  ${rendered}`
+}
+
+// Stores written before ids were derived from reviews.jsonl can hold several
+// records under one id. Taking the first match silently returns the oldest,
+// which is how a long-since-shipped note gets handed back as current work.
+// Refuse instead, and show enough for the user to identify the one they meant.
 function findReview(root, id) {
   const reviews = readReviews(root)
   const resolvedId = resolveReviewId(root, id)
-  const review = reviews.find((item) => item.id === resolvedId)
+  const matches = reviews.filter((item) => item.id === resolvedId)
 
-  if (!review) {
+  if (!matches.length) {
     throw new Error(`Review ${id} not found`)
   }
 
-  return { review, reviews }
+  if (matches.length > 1) {
+    throw new Error(
+      `Review ${resolvedId} is ambiguous: ${matches.length} records share this id.\n` +
+      matches.map(describeCandidate).join('\n') + '\n' +
+      '  Reassign unique ids with tools/repair-bubo-ids.js, then retry.'
+    )
+  }
+
+  return { review: matches[0], reviews }
 }
 
 function buildConsiderationPrompt(review) {
@@ -41,13 +58,20 @@ function buildConsiderationPrompt(review) {
   ].join('\n')
 }
 
+// Promotion is a read-modify-write over the whole store: it reads every record,
+// flips one, and rewrites the file. Without the lock, a review appended between
+// the read and the rewrite is erased by the stale snapshot — which also drops
+// the high-water mark and lets a later review reuse an id already issued. Read
+// and rewrite inside the same lock createReview uses.
 function promoteReview(root, id) {
-  const { review, reviews } = findReview(root, id)
+  return withLock(root, () => {
+    const { review, reviews } = findReview(root, id)
 
-  review.status = 'promoted'
-  review.taskPrompt = `Implement Bubo review ${review.id}.\nProblem: ${review.problem}\nEvidence: ${review.evidence}\nSolution: ${review.solution}`
-  rewriteReviews(root, reviews)
-  return review
+    review.status = 'promoted'
+    review.taskPrompt = `Implement Bubo review ${review.id}.\nProblem: ${review.problem}\nEvidence: ${review.evidence}\nSolution: ${review.solution}`
+    rewriteReviews(root, reviews)
+    return review
+  })
 }
 
 function considerReview(root, id) {

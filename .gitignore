@@ -1,2 +1,4 @@
 .bubo/
 node_modules/
+.omx/
+.serena/
