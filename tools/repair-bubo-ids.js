@@ -15,11 +15,14 @@
 //   node tools/repair-bubo-ids.js --scan ~/programming          # find stores
 //   node tools/repair-bubo-ids.js <path> --write                # apply
 //
-// Repair policy: the earliest record in each duplicated id group keeps the id,
-// because that is the record the old lookup already resolved to, so any
-// reference written down elsewhere still points at the same note. Later
-// duplicates are reassigned above the store's high-water mark, oldest first.
-// Unparseable lines are preserved verbatim and reported, never dropped.
+// Repair policy: in each duplicated id group the FIRST RECORD IN FILE ORDER
+// keeps the id, because Array.find() is what the old lookup used and it returns
+// the first physical match — so any reference written down elsewhere still
+// points at the same note. Later duplicates are reassigned above the store's
+// high-water mark, oldest first. Unparseable lines are preserved verbatim and
+// reported, never dropped.
+//
+// Repair runs under the store's .bubo/.lock, so it cannot race a live session.
 
 const fs = require('node:fs')
 const path = require('node:path')
@@ -29,20 +32,34 @@ function parseStore(raw) {
   const damaged = []
 
   raw.split('\n').filter(Boolean).forEach((line, index) => {
+    let review
     try {
-      records.push({ review: JSON.parse(line), line, index })
+      review = JSON.parse(line)
     } catch {
       damaged.push({ line, index })
+      return
     }
+    // `null`, numbers and strings are all valid JSON but not reviews. Treating
+    // them as records crashed later on `.id`, contradicting the promise that
+    // unreadable lines are preserved rather than fatal.
+    if (!review || typeof review !== 'object' || Array.isArray(review)) {
+      damaged.push({ line, index })
+      return
+    }
+    records.push({ review, line, index })
   })
 
   return { records, damaged }
 }
 
-function sortKey(entry) {
-  // Timestamp first so reassignment follows real chronology; file order breaks
-  // ties so the result is deterministic for records written in the same ms.
-  return [String(entry.review.timestamp || ''), entry.index]
+// Timestamp first so reassignment follows real chronology; file order breaks
+// ties. Compare the fields explicitly: relational operators on arrays coerce to
+// strings, which ordered index 10 before index 2.
+function compareEntries(a, b) {
+  const ta = String(a.review.timestamp || '')
+  const tb = String(b.review.timestamp || '')
+  if (ta !== tb) return ta < tb ? -1 : 1
+  return a.index - b.index
 }
 
 function planRepair(raw) {
@@ -57,7 +74,7 @@ function planRepair(raw) {
 
   const numericIds = records
     .map((entry) => entry.review.id)
-    .filter((id) => Number.isInteger(id))
+    .filter((id) => Number.isSafeInteger(id))
   let nextId = numericIds.length ? Math.max(...numericIds) + 1 : 1
 
   const reassignments = []
@@ -66,12 +83,22 @@ function planRepair(raw) {
     .filter(([, entries]) => entries.length > 1)
     .sort((a, b) => (a[0] > b[0] ? 1 : -1))
     .forEach(([id, entries]) => {
-      const ordered = [...entries].sort((a, b) => (sortKey(a) < sortKey(b) ? -1 : 1))
-      // ordered[0] keeps `id`; everything after it gets a fresh one.
-      ordered.slice(1).forEach((entry) => {
-        reassignments.push({ from: id, to: nextId, entry })
-        nextId += 1
-      })
+      // The keeper is the FIRST RECORD IN FILE ORDER, because that is the one
+      // the old Array.find() lookup resolved to. Picking by timestamp instead
+      // silently moved an id to a different note whenever a store's file order
+      // and timestamp order disagreed.
+      const keeper = entries.reduce((lowest, entry) => (entry.index < lowest.index ? entry : lowest))
+      // Everything else is reassigned oldest-first for a readable result.
+      entries
+        .filter((entry) => entry !== keeper)
+        .sort(compareEntries)
+        .forEach((entry) => {
+          if (nextId >= Number.MAX_SAFE_INTEGER) {
+            throw new Error('Cannot repair: reassignment would exceed the safe integer ceiling')
+          }
+          reassignments.push({ from: id, to: nextId, entry })
+          nextId += 1
+        })
     })
 
   return { records, damaged, reassignments, nextId, duplicateIds:
@@ -156,7 +183,70 @@ function findStores(root, depth = 4) {
   return found
 }
 
-function repairStore(store, write) {
+// The same .bubo/.lock protocol the store uses, reimplemented here so the tool
+// stays standalone. Without it, repair's read-backup-replace races a live
+// session's append and silently drops the review written mid-repair.
+function acquireStoreLock(buboDir, timeoutMs = 15000) {
+  const lockPath = path.join(buboDir, '.lock')
+  const token = `repair-${process.pid}-${Math.random().toString(36).slice(2)}`
+  const deadline = Date.now() + timeoutMs
+
+  for (;;) {
+    try {
+      fs.mkdirSync(lockPath)
+      fs.writeFileSync(path.join(lockPath, 'owner'), `${token}\n`)
+      return { lockPath, token }
+    } catch (error) {
+      if (error.code !== 'EEXIST') throw error
+      let heldSince = 0
+      try {
+        heldSince = fs.statSync(lockPath).mtimeMs
+      } catch {
+        continue
+      }
+      if (Date.now() - heldSince > 10000) {
+        try {
+          fs.renameSync(lockPath, `${lockPath}.stale-${token}`)
+        } catch {
+          // Lost the race to claim it; retry.
+        }
+        continue
+      }
+      if (Date.now() > deadline) {
+        throw new Error(`Timed out waiting for the Bubo store lock at ${lockPath}. Is a session writing?`)
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    }
+  }
+}
+
+function releaseStoreLock({ lockPath, token }) {
+  let owner = null
+  try {
+    owner = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').trim()
+  } catch {
+    return
+  }
+  if (owner === token) fs.rmSync(lockPath, { recursive: true, force: true })
+}
+
+// Refuse to work through a symlink. The store and its backup are predictable
+// paths; following a link would let a planted symlink redirect the backup write
+// on top of an unrelated file.
+function assertNotSymlink(target) {
+  let stat
+  try {
+    stat = fs.lstatSync(target)
+  } catch {
+    return
+  }
+  if (stat.isSymbolicLink()) {
+    throw new Error(`Refusing to operate on a symlinked path: ${target}`)
+  }
+}
+
+function repairStore(store, write, options = {}) {
+  assertNotSymlink(store.reviews)
   const raw = fs.readFileSync(store.reviews, 'utf8')
   const { plan, content } = applyRepair(raw)
 
@@ -171,16 +261,38 @@ function repairStore(store, write) {
 
   if (!write || !plan.reassignments.length) return summary
 
-  const backup = `${store.reviews}.bak`
-  fs.copyFileSync(store.reviews, backup)
+  // Hold the store lock across the whole transaction: re-read under the lock so
+  // a review appended between the dry-run read and now is included rather than
+  // overwritten, then back up and replace.
+  const held = acquireStoreLock(store.dir, options.lockTimeoutMs)
+  try {
+    const fresh = fs.readFileSync(store.reviews, 'utf8')
+    const locked = applyRepair(fresh)
+    summary.records = locked.plan.records.length
+    summary.damaged = locked.plan.damaged.length
+    summary.distinctIds = new Set(locked.plan.records.map((entry) => entry.review.id)).size
+    summary.duplicateIds = locked.plan.duplicateIds
+    summary.reassigned = locked.plan.reassignments.length
 
-  const tmp = `${store.reviews}.${process.pid}.tmp`
-  fs.writeFileSync(tmp, content)
-  fs.renameSync(tmp, store.reviews)
+    if (!locked.plan.reassignments.length) return summary
 
-  summary.backup = backup
-  summary.state = pruneState(path.join(store.dir, 'state.json'), true)
-  return summary
+    // Unique backup name, created exclusively: never clobber, never follow a
+    // pre-planted link at a predictable path.
+    const backup = `${store.reviews}.${new Date().toISOString().replace(/[:.]/g, '')}.bak`
+    assertNotSymlink(backup)
+    fs.copyFileSync(store.reviews, backup, fs.constants.COPYFILE_EXCL)
+
+    const tmp = `${store.reviews}.${process.pid}.tmp`
+    assertNotSymlink(tmp)
+    fs.writeFileSync(tmp, locked.content, { flag: 'wx' })
+    fs.renameSync(tmp, store.reviews)
+
+    summary.backup = backup
+    summary.state = pruneState(path.join(store.dir, 'state.json'), true)
+    return summary
+  } finally {
+    releaseStoreLock(held)
+  }
 }
 
 function main(argv) {
@@ -261,4 +373,4 @@ if (require.main === module) {
   process.exit(main(process.argv.slice(2)))
 }
 
-module.exports = { applyRepair, findStores, planRepair, resolveStore }
+module.exports = { applyRepair, findStores, planRepair, repairStore, resolveStore }
