@@ -6,11 +6,12 @@ const path = require('node:path')
 
 const { appendReview, createReview, ensureProjectState, readReviews } = require('../scripts/lib/store')
 const { considerReview, promoteReview } = require('../scripts/lib/promote')
+const { makeProjectRoot } = require('./helpers')
 
 // Build the exact shape observed in the wild: one id owned by several records,
 // oldest first, after a counter rewind reused numbers that were already taken.
 function seedDuplicateIds(prefix) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  const root = makeProjectRoot(prefix)
   ensureProjectState(root)
   appendReview(root, {
     id: 12,
@@ -30,7 +31,7 @@ function seedDuplicateIds(prefix) {
 }
 
 test('promotion resolves review by ID and marks it promoted', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-promote-'))
+  const root = makeProjectRoot('bubo-promote-')
   const created = createReview(root, {
     reason: 'manual',
     rendered: 'test review',
@@ -49,7 +50,7 @@ test('promotion resolves review by ID and marks it promoted', () => {
 })
 
 test('consideration resolves review by ID without promoting it and returns a receiving-code-review prompt', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-consider-lib-'))
+  const root = makeProjectRoot('bubo-consider-lib-')
   const created = createReview(root, {
     reason: 'manual',
     rendered: 'test review',

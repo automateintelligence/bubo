@@ -6,9 +6,10 @@ const path = require('node:path')
 
 const { createReview } = require('../scripts/lib/store')
 const { buildLaunchSpec } = require('../scripts/claude-wrapper')
+const { makeProjectRoot } = require('./helpers')
 
 test('wrapper builds a Claude launch spec carrying inert Bubo context', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-claude-wrap-'))
+  const root = makeProjectRoot('bubo-claude-wrap-')
   const review = createReview(root, {
     reason: 'manual',
     problem: 'placeholder alert_id=0 can collide under concurrent speculative bursts.',
@@ -37,7 +38,7 @@ test('wrapper builds a Claude launch spec carrying inert Bubo context', () => {
 })
 
 test('wrapper appends an explicit user prompt as the trailing positional', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-claude-wrap-prompt-'))
+  const root = makeProjectRoot('bubo-claude-wrap-prompt-')
   const spec = buildLaunchSpec({
     projectRoot: root,
     review: null,

@@ -5,6 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { installClaude } = require('../scripts/lib/install-claude')
+const { makeProjectRoot } = require('./helpers')
 
 const REPO_ROOT = path.resolve(__dirname, '..')
 
@@ -13,7 +14,7 @@ function readJson(file) {
 }
 
 test('installClaude scaffolds hooks for the passive review surface', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-install-'))
+  const root = makeProjectRoot('bubo-install-')
   const result = installClaude(root, { repoRoot: REPO_ROOT })
 
   const settings = readJson(result.settingsPath)
@@ -28,7 +29,7 @@ test('installClaude scaffolds hooks for the passive review surface', () => {
 })
 
 test('installClaude writes a native /bubo slash command bound to the CLI', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-install-cmd-'))
+  const root = makeProjectRoot('bubo-install-cmd-')
   const result = installClaude(root, { repoRoot: REPO_ROOT })
 
   const command = fs.readFileSync(result.commandPath, 'utf8')
@@ -43,7 +44,7 @@ test('installClaude writes a native /bubo slash command bound to the CLI', () =>
 })
 
 test('installClaude is idempotent and preserves existing settings', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-install-merge-'))
+  const root = makeProjectRoot('bubo-install-merge-')
   const claudeDir = path.join(root, '.claude')
   fs.mkdirSync(claudeDir, { recursive: true })
   fs.writeFileSync(

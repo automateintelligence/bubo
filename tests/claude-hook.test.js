@@ -6,9 +6,10 @@ const path = require('node:path')
 
 const { handleHookEvent, classifyToolEvent } = require('../scripts/lib/claude-hook')
 const { readConfig, readReviews, readState, writeState, ensureProjectState } = require('../scripts/lib/store')
+const { makeProjectRoot } = require('./helpers')
 
 function tmpProject(label) {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), `bubo-claude-${label}-`))
+  const root = makeProjectRoot(`bubo-claude-${label}-`)
   ensureProjectState(root)
   return root
 }
@@ -168,7 +169,7 @@ test('UserPromptSubmit injects an open-ended reflection nudge on the slow cadenc
 
 test('hook cwd is resolved to the git root so state is shared, not split per subdirectory', async () => {
   const { execSync } = require('node:child_process')
-  const repo = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-claude-cwd-'))
+  const repo = makeProjectRoot('bubo-claude-cwd-')
   execSync(`git -C "${repo}" init -q`)
   const sub = path.join(repo, 'packages', 'app')
   fs.mkdirSync(sub, { recursive: true })

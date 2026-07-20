@@ -5,6 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { createReview, readReviews, readConfig } = require('../scripts/lib/store')
+const { makeProjectRoot } = require('./helpers')
 const {
   buildStartupPrompt,
   createStartReview,
@@ -25,7 +26,7 @@ function makeReview(root) {
 }
 
 test('shared startup prompt carries the inert review contract for any host', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-'))
+  const root = makeProjectRoot('bubo-session-')
   const review = makeReview(root)
   const prompt = buildStartupPrompt({ review, host: 'codex' })
 
@@ -54,7 +55,7 @@ test('claude host advertises native slash commands', () => {
 })
 
 test('startup review allocates a fresh id per allowed manual trigger', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-start-'))
+  const root = makeProjectRoot('bubo-session-start-')
 
   const first = await createStartReview(root, { reason: 'manual', 'diff-text': 'const draft = { alert_id: 0 }' })
   const second = await createStartReview(root, { reason: 'manual', 'diff-text': 'const draft = { alert_id: 0 }' })
@@ -65,7 +66,7 @@ test('startup review allocates a fresh id per allowed manual trigger', async () 
 })
 
 test('startup review stays silent when no concrete improvement is found', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-silent-'))
+  const root = makeProjectRoot('bubo-session-silent-')
   const review = await createStartReview(root, { reason: 'manual', 'diff-text': 'const value = 1' })
 
   assert.equal(review, null)
@@ -73,7 +74,7 @@ test('startup review stays silent when no concrete improvement is found', async 
 })
 
 test('the working diff is read lazily — never when the cooldown blocks the turn', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-lazy-'))
+  const root = makeProjectRoot('bubo-session-lazy-')
   let reads = 0
   const getDiff = () => { reads += 1; return 'const draft = { alert_id: 0 }' }
   const now = 5_000_000
@@ -87,7 +88,7 @@ test('the working diff is read lazily — never when the cooldown blocks the tur
 })
 
 test('dedup suppresses a note whose problem matches a recent one', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-dedup-'))
+  const root = makeProjectRoot('bubo-session-dedup-')
   const diff = 'const draft = { alert_id: 0 }'
   const turnMs = readConfig(root).cooldowns.turnMs
 
@@ -100,7 +101,7 @@ test('dedup suppresses a note whose problem matches a recent one', async () => {
 })
 
 test('reflection cadence does not fire immediately — the first check starts the clock', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-reflect-'))
+  const root = makeProjectRoot('bubo-session-reflect-')
   const reflectMs = readConfig(root).cooldowns.reflectMs
   const start = 9_000_000
 
@@ -114,7 +115,7 @@ test('reflection cadence does not fire immediately — the first check starts th
 })
 
 test('reflection cadence stays silent while Bubo is disabled', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-reflect-off-'))
+  const root = makeProjectRoot('bubo-session-reflect-off-')
   const { readState, writeState } = require('../scripts/lib/store')
   const state = readState(root)
   state.enabled = false

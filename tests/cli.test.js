@@ -7,6 +7,7 @@ const path = require('node:path')
 const { execSync } = require('node:child_process')
 
 const { parseArgs } = require('../scripts/cli')
+const { makeProjectRoot } = require('./helpers')
 
 test('parseArgs treats an empty-string value as a value, not a boolean flag', () => {
   // The /bubo slash command expands to `... status --project ""` when
@@ -18,7 +19,7 @@ test('parseArgs treats an empty-string value as a value, not a boolean flag', ()
 })
 
 test('status with an empty --project falls back to cwd instead of crashing', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-empty-project-'))
+  const root = makeProjectRoot('bubo-empty-project-')
   execSync(`git -C "${root}" init -q`)
   const cli = path.join(path.resolve(__dirname, '..'), 'scripts/cli.js')
 
@@ -31,7 +32,7 @@ test('status with an empty --project falls back to cwd instead of crashing', () 
 })
 
 test('review command prints compact inline note and writes project-scoped log', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-'))
+  const root = makeProjectRoot('bubo-cli-')
   const repoRoot = path.resolve(__dirname, '..')
   const result = spawnSync('node', [
     path.join(repoRoot, 'scripts/cli.js'),
@@ -47,7 +48,7 @@ test('review command prints compact inline note and writes project-scoped log', 
 })
 
 test('review alias prints compact inline note and writes project-scoped log', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-review-'))
+  const root = makeProjectRoot('bubo-cli-review-')
   const repoRoot = path.resolve(__dirname, '..')
   const result = spawnSync('node', [
     path.join(repoRoot, 'scripts/cli.js'),
@@ -63,7 +64,7 @@ test('review alias prints compact inline note and writes project-scoped log', ()
 })
 
 test('record-review persists a structured passive note and prints the rendered line', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-record-'))
+  const root = makeProjectRoot('bubo-record-')
   const repoRoot = path.resolve(__dirname, '..')
   const result = spawnSync('node', [
     path.join(repoRoot, 'scripts/cli.js'),
@@ -91,7 +92,7 @@ test('record-review persists a structured passive note and prints the rendered l
 })
 
 test('review command creates a new review id on each allowed trigger', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-repeat-'))
+  const root = makeProjectRoot('bubo-repeat-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -122,7 +123,7 @@ test('review command creates a new review id on each allowed trigger', () => {
 })
 
 test('review command stays silent when no concrete improvement is found', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-no-finding-'))
+  const root = makeProjectRoot('bubo-no-finding-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -142,7 +143,7 @@ test('review command stays silent when no concrete improvement is found', () => 
 })
 
 test('session stop disables Bubo and session start re-enables it', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-session-'))
+  const root = makeProjectRoot('bubo-session-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -185,7 +186,7 @@ test('session stop disables Bubo and session start re-enables it', () => {
 })
 
 test('no command at all defaults to session status (bare /bubo on any host)', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-default-'))
+  const root = makeProjectRoot('bubo-bare-default-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -199,7 +200,7 @@ test('no command at all defaults to session status (bare /bubo on any host)', ()
 })
 
 test('bare start/stop/status map to session controls (as the /bubo slash command expands them)', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-bare-controls-'))
+  const root = makeProjectRoot('bubo-bare-controls-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
   const run = (cmd) => spawnSync('node', [cli, cmd, '--project', root], { encoding: 'utf8' })
@@ -217,7 +218,7 @@ test('bare start/stop/status map to session controls (as the /bubo slash command
 })
 
 test('implement hyphen alias promotes review by ID', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-implement-alias-'))
+  const root = makeProjectRoot('bubo-implement-alias-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -245,7 +246,7 @@ test('implement hyphen alias promotes review by ID', () => {
 })
 
 test('implement last promotes the most recent review in the current project', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-implement-last-'))
+  const root = makeProjectRoot('bubo-implement-last-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -276,7 +277,7 @@ test('implement last promotes the most recent review in the current project', ()
 })
 
 test('consider command returns a receiving-code-review evaluation envelope without promoting the review', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-consider-'))
+  const root = makeProjectRoot('bubo-consider-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -310,7 +311,7 @@ test('consider command returns a receiving-code-review evaluation envelope witho
 })
 
 test('consider hyphen alias resolves the same review by ID', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-consider-alias-'))
+  const root = makeProjectRoot('bubo-consider-alias-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -338,7 +339,7 @@ test('consider hyphen alias resolves the same review by ID', () => {
 })
 
 test('install-claude scaffolds hooks and a slash command into the project', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install-'))
+  const root = makeProjectRoot('bubo-cli-install-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -351,8 +352,8 @@ test('install-claude scaffolds hooks and a slash command into the project', () =
 })
 
 test('install sets up the detected host(s) in one command', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install1-'))
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-codexhome-'))
+  const root = makeProjectRoot('bubo-cli-install1-')
+  const codexHome = makeProjectRoot('bubo-cli-codexhome-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
@@ -374,8 +375,8 @@ test('install sets up the detected host(s) in one command', () => {
 })
 
 test('install survives an unwritable CODEX_HOME and still completes the Claude side', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-install-ro-'))
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-cli-codexro-'))
+  const root = makeProjectRoot('bubo-cli-install-ro-')
+  const codexHome = makeProjectRoot('bubo-cli-codexro-')
   fs.chmodSync(codexHome, 0o500) // exists but not writable
 
   const result = spawnSync('node', [path.join(path.resolve(__dirname, '..'), 'scripts/cli.js'), 'install', '--project', root], {
@@ -392,7 +393,7 @@ test('install survives an unwritable CODEX_HOME and still completes the Claude s
 })
 
 test('claude-hook entrypoint injects a passive note from a UserPromptSubmit event', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-hook-e2e-'))
+  const root = makeProjectRoot('bubo-hook-e2e-')
   const repoRoot = path.resolve(__dirname, '..')
   const hook = path.join(repoRoot, 'scripts/claude-hook.js')
 
@@ -426,7 +427,7 @@ test('claude-hook entrypoint injects a passive note from a UserPromptSubmit even
 })
 
 test('consider last resolves the most recent review in the current project without promoting it', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-consider-last-'))
+  const root = makeProjectRoot('bubo-consider-last-')
   const repoRoot = path.resolve(__dirname, '..')
   const cli = path.join(repoRoot, 'scripts/cli.js')
 
