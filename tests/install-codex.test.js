@@ -5,11 +5,12 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { installCodexPrompt, resolveCodexHome } = require('../scripts/lib/install-codex')
+const { makeProjectRoot } = require('./helpers')
 
 const REPO_ROOT = path.resolve(__dirname, '..')
 
 test('installCodexPrompt writes a /bubo custom prompt into CODEX_HOME/prompts', () => {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-codex-home-'))
+  const codexHome = makeProjectRoot('bubo-codex-home-')
   const { promptPath } = installCodexPrompt({ repoRoot: REPO_ROOT, codexHome })
 
   assert.equal(promptPath, path.join(codexHome, 'prompts', 'bubo.md'))
@@ -27,7 +28,7 @@ test('installCodexPrompt writes a /bubo custom prompt into CODEX_HOME/prompts', 
 })
 
 test('installCodexPrompt is idempotent and keeps unrelated prompts', () => {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-codex-idem-'))
+  const codexHome = makeProjectRoot('bubo-codex-idem-')
   const promptsDir = path.join(codexHome, 'prompts')
   fs.mkdirSync(promptsDir, { recursive: true })
   fs.writeFileSync(path.join(promptsDir, 'other.md'), 'keep me')
@@ -46,7 +47,7 @@ test('resolveCodexHome prefers CODEX_HOME over the default ~/.codex', () => {
 })
 
 test('the prompt covers the full /bubo control surface', () => {
-  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-codex-surface-'))
+  const codexHome = makeProjectRoot('bubo-codex-surface-')
   const { promptPath } = installCodexPrompt({ repoRoot: REPO_ROOT, codexHome })
   const prompt = fs.readFileSync(promptPath, 'utf8')
 

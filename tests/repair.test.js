@@ -6,6 +6,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { applyRepair, planRepair, repairStore, resolveStore } = require('../tools/repair-bubo-ids')
+const { makeProjectRoot } = require('./helpers')
 
 function record(id, timestamp, rendered) {
   return JSON.stringify({ id, timestamp, status: 'new', rendered })
@@ -138,7 +139,7 @@ test('equal timestamps order by numeric index, not string collation', () => {
 })
 
 test('repair refuses to follow a symlinked store', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-repair-symlink-'))
+  const dir = makeProjectRoot('bubo-repair-symlink-')
   const bubo = path.join(dir, '.bubo')
   fs.mkdirSync(bubo)
   const real = path.join(dir, 'elsewhere.jsonl')
@@ -150,7 +151,7 @@ test('repair refuses to follow a symlinked store', () => {
 })
 
 test('repair waits on a held store lock instead of racing it', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-repair-lock-'))
+  const dir = makeProjectRoot('bubo-repair-lock-')
   const bubo = path.join(dir, '.bubo')
   fs.mkdirSync(bubo)
   fs.writeFileSync(path.join(bubo, 'reviews.jsonl'), DUPLICATED)

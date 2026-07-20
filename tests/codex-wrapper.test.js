@@ -6,9 +6,10 @@ const path = require('node:path')
 
 const { createReview, readReviews } = require('../scripts/lib/store')
 const { buildLaunchSpec, createStartReview } = require('../scripts/codex-wrapper')
+const { makeProjectRoot } = require('./helpers')
 
 test('wrapper builds a Codex launch spec with inert Bubo review context', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-wrapper-'))
+  const root = makeProjectRoot('bubo-wrapper-')
   const review = createReview(root, {
     reason: 'manual',
     problem: 'placeholder alert_id=0 can collide under concurrent speculative bursts.',
@@ -44,7 +45,7 @@ test('wrapper builds a Codex launch spec with inert Bubo review context', () => 
 })
 
 test('wrapper passes through the dangerous bypass flag when explicitly requested', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-wrapper-flags-'))
+  const root = makeProjectRoot('bubo-wrapper-flags-')
   const spec = buildLaunchSpec({
     projectRoot: root,
     review: null,
@@ -55,7 +56,7 @@ test('wrapper passes through the dangerous bypass flag when explicitly requested
 })
 
 test('startup review creates a new review id on each allowed manual trigger', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-start-'))
+  const root = makeProjectRoot('bubo-start-')
 
   const first = await createStartReview(root, {
     reason: 'manual',
@@ -73,7 +74,7 @@ test('startup review creates a new review id on each allowed manual trigger', as
 })
 
 test('startup review stays silent when no concrete improvement is found', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-start-silent-'))
+  const root = makeProjectRoot('bubo-start-silent-')
 
   const review = await createStartReview(root, {
     reason: 'manual',

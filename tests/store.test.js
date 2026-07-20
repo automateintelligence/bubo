@@ -5,6 +5,7 @@ const os = require('node:os')
 const path = require('node:path')
 
 const { spawn } = require('node:child_process')
+const { makeProjectRoot } = require('./helpers')
 
 const {
   ensureProjectState,
@@ -27,7 +28,7 @@ function makePayload(label) {
 }
 
 test('store creates .bubo and appends project-scoped reviews', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-store-'))
+  const root = makeProjectRoot('bubo-store-')
   ensureProjectState(root)
   appendReview(root, { id: 1, rendered: 'first review', status: 'new' })
   const reviews = readReviews(root)
@@ -37,7 +38,7 @@ test('store creates .bubo and appends project-scoped reviews', () => {
 })
 
 test('store defaults Bubo session state to enabled', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-state-'))
+  const root = makeProjectRoot('bubo-state-')
   ensureProjectState(root)
   const state = readState(root)
   assert.equal(state.enabled, true)
@@ -47,7 +48,7 @@ test('store defaults Bubo session state to enabled', () => {
 // rewritten constantly and has been observed to rewind; reviews.jsonl is
 // append-only and never resets, so ids must be derived from it.
 test('review ids keep climbing after state.json is reset', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-id-reset-'))
+  const root = makeProjectRoot('bubo-id-reset-')
   createReview(root, makePayload('one'))
   createReview(root, makePayload('two'))
   const third = createReview(root, makePayload('three'))
@@ -70,7 +71,7 @@ test('review ids keep climbing after state.json is reset', () => {
 // could fall and a later note could reuse a number already handed out.
 test('ids stay strictly increasing across a promotion', () => {
   const { promoteReview } = require('../scripts/lib/promote')
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-id-monotonic-'))
+  const root = makeProjectRoot('bubo-id-monotonic-')
 
   const first = createReview(root, makePayload('one'))
   const second = createReview(root, makePayload('two'))
@@ -93,7 +94,7 @@ test('ids stay strictly increasing across a promotion', () => {
 })
 
 test('review ids keep climbing after state.json is corrupted', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-id-corrupt-'))
+  const root = makeProjectRoot('bubo-id-corrupt-')
   createReview(root, makePayload('one'))
   createReview(root, makePayload('two'))
 
@@ -106,7 +107,7 @@ test('review ids keep climbing after state.json is corrupted', () => {
 })
 
 test('a corrupt state.json is reported, not silently treated as a fresh start', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-state-corrupt-'))
+  const root = makeProjectRoot('bubo-state-corrupt-')
   ensureProjectState(root)
   fs.writeFileSync(path.join(root, '.bubo', 'state.json'), '{"enabled": fal')
 
@@ -114,7 +115,7 @@ test('a corrupt state.json is reported, not silently treated as a fresh start', 
 })
 
 test('a missing state.json is still an ordinary fresh start', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-state-missing-'))
+  const root = makeProjectRoot('bubo-state-missing-')
   ensureProjectState(root)
   fs.rmSync(path.join(root, '.bubo', 'state.json'))
 
@@ -122,7 +123,7 @@ test('a missing state.json is still an ordinary fresh start', () => {
 })
 
 test('concurrent createReview calls never share an id', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-id-race-'))
+  const root = makeProjectRoot('bubo-id-race-')
   ensureProjectState(root)
 
   const storePath = path.join(__dirname, '..', 'scripts', 'lib', 'store.js')
@@ -170,7 +171,7 @@ test('concurrent createReview calls never share an id', () => {
 // file", and the second's write truncated the first's already-appended review.
 // The earlier race test pre-initialized the store, which hid exactly this.
 test('concurrent first use never truncates the store or duplicates id 1', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-first-use-race-'))
+  const root = makeProjectRoot('bubo-first-use-race-')
   // Deliberately do NOT call ensureProjectState — first use is the failure window.
   const storePath = path.join(__dirname, '..', 'scripts', 'lib', 'store.js')
   const gate = path.join(root, 'go')
@@ -207,7 +208,7 @@ test('concurrent first use never truncates the store or duplicates id 1', () => 
 // no recorded holder. Staleness was read from the owner file, so an ownerless
 // lock was never stale and every later writer timed out forever.
 test('a lock with no owner record is eventually broken, not deadlocked', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-ownerless-lock-'))
+  const root = makeProjectRoot('bubo-ownerless-lock-')
   ensureProjectState(root)
   const lockPath = path.join(root, '.bubo', '.lock')
   fs.mkdirSync(lockPath)
@@ -224,7 +225,7 @@ test('a lock with no owner record is eventually broken, not deadlocked', () => {
 // remove a lock another contender had just legitimately acquired, and the
 // original holder's release could delete its successor's lock.
 test('releasing a lock does not delete a successor lock', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-lock-ownership-'))
+  const root = makeProjectRoot('bubo-lock-ownership-')
   ensureProjectState(root)
   const lockPath = path.join(root, '.bubo', '.lock')
 
@@ -244,7 +245,7 @@ test('releasing a lock does not delete a successor lock', () => {
 })
 
 test('id allocation refuses to run past the safe integer ceiling', () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-id-ceiling-'))
+  const root = makeProjectRoot('bubo-id-ceiling-')
   ensureProjectState(root)
   appendReview(root, { id: Number.MAX_SAFE_INTEGER, timestamp: '2026-07-20T00:00:00Z', status: 'new', rendered: 'ceiling' })
 
