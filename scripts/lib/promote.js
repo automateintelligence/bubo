@@ -15,16 +15,33 @@ function resolveReviewId(root, id) {
   return Number(id)
 }
 
+function describeCandidate(review) {
+  const rendered = String(review.rendered || '').slice(0, 60)
+  return `  ${review.timestamp || 'unknown time'}  ${rendered}`
+}
+
+// Stores written before ids were derived from reviews.jsonl can hold several
+// records under one id. Taking the first match silently returns the oldest,
+// which is how a long-since-shipped note gets handed back as current work.
+// Refuse instead, and show enough for the user to identify the one they meant.
 function findReview(root, id) {
   const reviews = readReviews(root)
   const resolvedId = resolveReviewId(root, id)
-  const review = reviews.find((item) => item.id === resolvedId)
+  const matches = reviews.filter((item) => item.id === resolvedId)
 
-  if (!review) {
+  if (!matches.length) {
     throw new Error(`Review ${id} not found`)
   }
 
-  return { review, reviews }
+  if (matches.length > 1) {
+    throw new Error(
+      `Review ${resolvedId} is ambiguous: ${matches.length} records share this id.\n` +
+      matches.map(describeCandidate).join('\n') + '\n' +
+      '  Reassign unique ids with tools/repair-bubo-ids.js, then retry.'
+    )
+  }
+
+  return { review: matches[0], reviews }
 }
 
 function buildConsiderationPrompt(review) {
