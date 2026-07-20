@@ -1,4 +1,4 @@
-const { readReviews, rewriteReviews } = require('./store')
+const { readReviews, rewriteReviews, withLock } = require('./store')
 
 function resolveReviewId(root, id) {
   if (id === 'last') {
@@ -58,13 +58,20 @@ function buildConsiderationPrompt(review) {
   ].join('\n')
 }
 
+// Promotion is a read-modify-write over the whole store: it reads every record,
+// flips one, and rewrites the file. Without the lock, a review appended between
+// the read and the rewrite is erased by the stale snapshot — which also drops
+// the high-water mark and lets a later review reuse an id already issued. Read
+// and rewrite inside the same lock createReview uses.
 function promoteReview(root, id) {
-  const { review, reviews } = findReview(root, id)
+  return withLock(root, () => {
+    const { review, reviews } = findReview(root, id)
 
-  review.status = 'promoted'
-  review.taskPrompt = `Implement Bubo review ${review.id}.\nProblem: ${review.problem}\nEvidence: ${review.evidence}\nSolution: ${review.solution}`
-  rewriteReviews(root, reviews)
-  return review
+    review.status = 'promoted'
+    review.taskPrompt = `Implement Bubo review ${review.id}.\nProblem: ${review.problem}\nEvidence: ${review.evidence}\nSolution: ${review.solution}`
+    rewriteReviews(root, reviews)
+    return review
+  })
 }
 
 function considerReview(root, id) {
