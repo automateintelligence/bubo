@@ -23,15 +23,24 @@ const DEFAULT_STATE = {
 // A held lock older than this is treated as abandoned (crashed process, killed
 // session) and broken, so one dead writer cannot wedge the store forever.
 const LOCK_STALE_MS = 10000
-const LOCK_TIMEOUT_MS = 5000
+// Must exceed LOCK_STALE_MS. A contender that gave up first would never reach
+// the point of declaring a lock stale, so abandoned locks could never be broken
+// and the store would wedge permanently.
+const LOCK_TIMEOUT_MS = 15000
 
 function buboDir(root) {
   return path.join(root, '.bubo')
 }
 
+// 'wx' creates only if the path does not exist, atomically. A plain
+// existsSync-then-write is two steps: two first-time writers could both observe
+// "no file" and the second write would truncate reviews the first had already
+// appended, losing records and reissuing id 1.
 function ensureFile(filePath, initialValue) {
-  if (!fs.existsSync(filePath)) {
-    fs.writeFileSync(filePath, initialValue)
+  try {
+    fs.writeFileSync(filePath, initialValue, { flag: 'wx' })
+  } catch (error) {
+    if (error.code !== 'EEXIST') throw error
   }
 }
 
@@ -63,29 +72,58 @@ function readJsonFile(filePath, fallback) {
   }
 }
 
+let lockCounter = 0
+
+// Every hold gets a token nobody else can guess or reproduce, so a holder can
+// prove the lock it is about to release is still the one it took.
+function mintToken() {
+  lockCounter += 1
+  return `${process.pid}-${lockCounter}-${Math.random().toString(36).slice(2)}`
+}
+
 // mkdir is atomic on POSIX and Windows alike: exactly one caller can create a
 // given directory, which makes it a lock without a dependency.
+//
+// Two properties this has to get right, both learned the hard way:
+//
+//   Staleness is read from the lock directory's own mtime, not from the owner
+//   file. A crash between mkdir and writing the owner leaves an ownerless lock;
+//   judging staleness by file contents made that lock immortal and every later
+//   writer timed out forever.
+//
+//   Breaking a stale lock claims it by rename rather than deleting it in place.
+//   rename to a unique name is atomic, so when several contenders decide the
+//   same lock is stale exactly one wins and the losers get ENOENT. A blind
+//   recursive delete let a contender erase a lock somebody else had just
+//   legitimately acquired.
 function acquireLock(dir, now = Date.now) {
   const lockPath = path.join(dir, '.lock')
   const deadline = now() + LOCK_TIMEOUT_MS
+  const token = mintToken()
 
   for (;;) {
     try {
       fs.mkdirSync(lockPath)
-      fs.writeFileSync(path.join(lockPath, 'owner'), `${process.pid} ${now()}\n`)
-      return lockPath
+      fs.writeFileSync(path.join(lockPath, 'owner'), `${token}\n`)
+      return { lockPath, token }
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
 
       let heldSince = 0
       try {
-        heldSince = Number(fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').split(' ')[1]) || 0
+        heldSince = fs.statSync(lockPath).mtimeMs
       } catch {
-        // Lock created but owner not yet written, or already released.
+        // Released between our mkdir and our stat; just retry.
+        continue
       }
 
-      if (heldSince && now() - heldSince > LOCK_STALE_MS) {
-        releaseLock(lockPath)
+      if (now() - heldSince > LOCK_STALE_MS) {
+        try {
+          // Atomically claim the stale lock. Only one contender's rename lands.
+          fs.renameSync(lockPath, `${lockPath}.stale-${mintToken()}`)
+        } catch {
+          // Someone else claimed or released it first.
+        }
         continue
       }
 
@@ -99,16 +137,44 @@ function acquireLock(dir, now = Date.now) {
   }
 }
 
-function releaseLock(lockPath) {
-  fs.rmSync(lockPath, { recursive: true, force: true })
+// Only remove the lock if it is still ours. If a stale-breaker took it over
+// while we were working, the directory now belongs to our successor and
+// deleting it would hand the store to two writers at once.
+function releaseLock({ lockPath, token }) {
+  let owner = null
+  try {
+    owner = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').trim()
+  } catch {
+    return
+  }
+
+  if (owner === token) {
+    fs.rmSync(lockPath, { recursive: true, force: true })
+  }
+}
+
+// Sweep lock directories abandoned by stale-breaking. Cheap, and keeps .bubo
+// from accumulating .lock.stale-* entries over a long-lived project.
+function sweepStaleLocks(dir) {
+  let entries = []
+  try {
+    entries = fs.readdirSync(dir)
+  } catch {
+    return
+  }
+  entries
+    .filter((name) => name.startsWith('.lock.stale-'))
+    .forEach((name) => fs.rmSync(path.join(dir, name), { recursive: true, force: true }))
 }
 
 function withLock(root, fn) {
-  const lockPath = acquireLock(buboDir(root))
+  const dir = buboDir(root)
+  const held = acquireLock(dir)
   try {
     return fn()
   } finally {
-    releaseLock(lockPath)
+    releaseLock(held)
+    sweepStaleLocks(dir)
   }
 }
 
@@ -195,8 +261,18 @@ function maxReviewId(root) {
       } catch {
         return max
       }
-      return Number.isInteger(id) && id > max ? id : max
+      return Number.isSafeInteger(id) && id > max ? id : max
     }, 0)
+}
+
+// Past MAX_SAFE_INTEGER, `max + 1 === max` and every later review would silently
+// share one id. Refuse rather than resume the exact bug this change removed.
+function nextReviewId(root) {
+  const max = maxReviewId(root)
+  if (max >= Number.MAX_SAFE_INTEGER) {
+    throw new Error('Bubo review ids are exhausted: the store has reached the safe integer ceiling')
+  }
+  return max + 1
 }
 
 // Ids come from reviews.jsonl rather than a counter in state.json: state.json
@@ -212,7 +288,7 @@ function createReview(root, payload) {
       status: payload.status || 'new',
       ...payload,
       // Assigned last: the store owns ids, never the caller.
-      id: maxReviewId(root) + 1
+      id: nextReviewId(root)
     }
 
     appendReview(root, review)

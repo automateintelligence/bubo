@@ -11,7 +11,8 @@ const {
   appendReview,
   createReview,
   readReviews,
-  readState
+  readState,
+  withLock
 } = require('../scripts/lib/store')
 
 function makePayload(label) {
@@ -160,4 +161,92 @@ test('concurrent createReview calls never share an id', () => {
       const collisions = ids.filter((id, i) => ids.indexOf(id) !== i)
       assert.equal(new Set(ids).size, 160, `${collisions.length} ids collided`)
     })
+})
+
+// --- Review findings: concurrency and lock correctness ---
+
+// ensureProjectState ran outside the lock and initialized files with a
+// non-exclusive existsSync/writeFileSync. Two first writers could both see "no
+// file", and the second's write truncated the first's already-appended review.
+// The earlier race test pre-initialized the store, which hid exactly this.
+test('concurrent first use never truncates the store or duplicates id 1', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-first-use-race-'))
+  // Deliberately do NOT call ensureProjectState — first use is the failure window.
+  const storePath = path.join(__dirname, '..', 'scripts', 'lib', 'store.js')
+  const gate = path.join(root, 'go')
+
+  const worker = `
+    const fs = require('node:fs')
+    const { createReview } = require(${JSON.stringify(storePath)})
+    const [root, gate] = process.argv.slice(1)
+    while (!fs.existsSync(gate)) {}
+    createReview(root, {
+      reason: 'manual', rendered: 'first-use', problem: 'p', evidence: 'e', solution: 's', context: {}
+    })
+  `
+
+  const workers = Array.from({ length: 8 }, () =>
+    new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['-e', worker, root, gate], { stdio: 'ignore' })
+      child.on('error', reject)
+      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`worker exit ${code}`))))
+    })
+  )
+
+  return new Promise((resolve) => setTimeout(resolve, 300))
+    .then(() => fs.writeFileSync(gate, ''))
+    .then(() => Promise.all(workers))
+    .then(() => {
+      const ids = readReviews(root).map((review) => review.id)
+      assert.equal(ids.length, 8, 'no review may be truncated away')
+      assert.equal(new Set(ids).size, 8, `ids collided: ${ids.join(', ')}`)
+    })
+})
+
+// A crash between creating the lock and writing its owner file left a lock with
+// no recorded holder. Staleness was read from the owner file, so an ownerless
+// lock was never stale and every later writer timed out forever.
+test('a lock with no owner record is eventually broken, not deadlocked', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-ownerless-lock-'))
+  ensureProjectState(root)
+  const lockPath = path.join(root, '.bubo', '.lock')
+  fs.mkdirSync(lockPath)
+  // Backdate past the stale threshold so the test does not sit through it.
+  const longAgo = new Date(Date.now() - 60000)
+  fs.utimesSync(lockPath, longAgo, longAgo)
+
+  const created = createReview(root, makePayload('after ownerless lock'))
+  assert.equal(created.id, 1)
+  assert.equal(readReviews(root).length, 1)
+})
+
+// Breaking a stale lock used a blind recursive delete, so a contender could
+// remove a lock another contender had just legitimately acquired, and the
+// original holder's release could delete its successor's lock.
+test('releasing a lock does not delete a successor lock', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-lock-ownership-'))
+  ensureProjectState(root)
+  const lockPath = path.join(root, '.bubo', '.lock')
+
+  let observed = null
+  withLock(root, () => {
+    // Simulate a stale-breaker taking over mid-hold: the lock we are about to
+    // release is no longer ours.
+    fs.rmSync(lockPath, { recursive: true, force: true })
+    fs.mkdirSync(lockPath)
+    fs.writeFileSync(path.join(lockPath, 'owner'), 'someone-else 0\n')
+    observed = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8')
+  })
+
+  assert.ok(fs.existsSync(lockPath), 'successor lock must survive our release')
+  assert.equal(fs.readFileSync(path.join(lockPath, 'owner'), 'utf8'), observed)
+  fs.rmSync(lockPath, { recursive: true, force: true })
+})
+
+test('id allocation refuses to run past the safe integer ceiling', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-id-ceiling-'))
+  ensureProjectState(root)
+  appendReview(root, { id: Number.MAX_SAFE_INTEGER, timestamp: '2026-07-20T00:00:00Z', status: 'new', rendered: 'ceiling' })
+
+  assert.throws(() => createReview(root, makePayload('overflow')), /safe integer|ceiling|exhausted/i)
 })
