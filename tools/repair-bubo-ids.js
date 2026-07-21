@@ -8,8 +8,10 @@
 // came first — usually a long-stale note.
 //
 // This script reassigns ids so every record is uniquely addressable again.
-// It is deliberately self-contained: no dependency on the Bubo plugin, so it
-// can be run against any checkout or copied to another machine.
+// It is not a plugin subcommand — run it directly — but it is NOT copyable on
+// its own: it shares ../scripts/lib/lock.js with the runtime, because two
+// implementations of one lock protocol drifted into evicting each other. Keep
+// it alongside the repo checkout.
 //
 //   node tools/repair-bubo-ids.js <project-or-.bubo-path>...   # dry run
 //   node tools/repair-bubo-ids.js --scan ~/programming          # find stores

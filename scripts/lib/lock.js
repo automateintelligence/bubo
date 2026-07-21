@@ -1,48 +1,41 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-// The single lock specification for the Bubo store. Both the runtime
-// (scripts/lib/store.js) and the standalone repair tool (tools/repair-bubo-ids.js)
-// use this module, because two implementations of the same protocol drift: one
-// wrote `token pid` owners and judged abandonment by process liveness while the
-// other wrote token-only owners and evicted by age, so each would happily evict
-// the other mid-write.
+// The single lock specification for the Bubo store, shared by the runtime
+// (scripts/lib/store.js) and the standalone repair tool, because two
+// implementations of one protocol drift apart and start evicting each other.
 //
-// Protocol
-// --------
-// `.bubo/.lock` is a directory. mkdir is atomic everywhere, so exactly one
-// caller creates it. Inside it, `owner` records `<token> <pid> <acquiredAtMs>`.
+// Why there is no automatic stale-lock recovery
+// ---------------------------------------------
+// Three successive designs tried to reclaim abandoned locks and all three had
+// the same defect, because the defect is not in the design — it is in the
+// primitives. Node on POSIX offers no atomic compare-and-swap on a pathname, so
+// "confirm this is the lock I inspected, then remove it" is always two syscalls
+// against a *name*. Between them the name can come to refer to something else:
 //
-// Reclaiming an abandoned lock is the hard part. Checking "is it abandoned?" and
-// then renaming or deleting the path is check-then-act: rename does not compare
-// source identity, so two contenders that both saw the same dead lock could each
-// remove whatever occupied the path afterwards — including a lock a third
-// process had legitimately acquired in between. Two writers then entered the
-// critical section together.
+//   1. check-then-rename on `.lock`      -> evicted a live successor
+//   2. the same, guarded by a breaker    -> evicted a live successor's breaker
+//   3. liveness plus a max-hold bound    -> evicted confirmed-live holders
 //
-// Reclamation therefore happens under a second, exclusive lock: `.lock.breaker`.
-// While that is held, `.bubo/.lock` cannot change, because the only parties that
-// could remove it are its own owner (verified dead) and another reclaimer (there
-// can only be one). Re-checking abandonment under the breaker is then sound, and
-// the removal cannot hit a successor.
+// So this implementation does not reclaim. It only ever publishes and removes
+// its own lock, which removes the entire class:
 //
-// The breaker is itself age-reclaimed, which is safe in a way the main lock is
-// not: it is held for microseconds, so a breaker older than BREAKER_STALE_MS
-// belongs to a process that died mid-reclaim.
+//   * A lock is published atomically. The directory is built complete, owner
+//     file and all, under a private name and then renamed into place. rename
+//     onto an existing directory fails, so a lock is never observable in a
+//     half-initialised state and there is no ownerless window for a stalled
+//     acquirer to overwrite later.
+//
+//   * A lock is removed only by the process that holds it. Nothing races the
+//     removal, because nothing else ever removes it.
+//
+// The cost is that a crashed session leaves its lock behind. That is a
+// deliberate trade: a wedged store announces itself with an actionable error,
+// whereas silent mutual exclusion failures corrupt review history. `bubo unlock`
+// clears it after confirming the owner is gone.
 
 const LOCK_NAME = '.lock'
-const BREAKER_NAME = '.lock.breaker'
-
 const DEFAULT_TIMEOUT_MS = 15000
-// Only used for a lock with no readable owner: a crash between creating the
-// directory and writing the owner file leaves no pid to interrogate.
-const OWNERLESS_STALE_MS = 10000
-// A breaker is held for the duration of one stat and one rmdir.
-const BREAKER_STALE_MS = 30000
-// pids are recycled. A live pid that has "held" the lock for longer than any
-// real operation is far more likely to be an unrelated process that inherited
-// the number than a genuine holder, so stop trusting liveness past this bound.
-const MAX_HOLD_MS = 3600000
 
 let counter = 0
 
@@ -51,8 +44,8 @@ function mintToken() {
   return `${process.pid}-${counter}-${Math.random().toString(36).slice(2)}`
 }
 
-// Signal 0 runs the existence and permission checks without delivering anything.
-// EPERM means the process exists but belongs to another user: still alive.
+// Signal 0 runs the existence and permission checks without delivering
+// anything. EPERM means the process exists but belongs to another user.
 function isProcessAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false
   try {
@@ -61,6 +54,10 @@ function isProcessAlive(pid) {
   } catch (error) {
     return error.code === 'EPERM'
   }
+}
+
+function lockPathFor(dir) {
+  return path.join(dir, LOCK_NAME)
 }
 
 function readOwner(lockPath) {
@@ -73,112 +70,74 @@ function readOwner(lockPath) {
   }
 }
 
-function directoryAge(lockPath, now) {
-  try {
-    return now - fs.statSync(lockPath).mtimeMs
-  } catch {
-    return null
-  }
-}
-
-// Elapsed time is the wrong primary test: a holder doing legitimately slow work
-// would be evicted mid-write. Whether the owning process still exists is the
-// question that matters.
-function isAbandoned(lockPath, now = Date.now()) {
+// Describe who holds the lock, for an error a human can act on.
+function describeHolder(lockPath) {
   const owner = readOwner(lockPath)
-
   if (!owner || !Number.isInteger(owner.pid) || owner.pid <= 0) {
-    const age = directoryAge(lockPath, now)
-    return age !== null && age > OWNERLESS_STALE_MS
+    return 'held by an unidentified process'
   }
-
-  if (!isProcessAlive(owner.pid)) return true
-
-  // Alive, but guard against pid reuse making a dead holder look present.
-  const heldFor = Number.isFinite(owner.acquiredAt) ? now - owner.acquiredAt : directoryAge(lockPath, now)
-  return heldFor !== null && heldFor > MAX_HOLD_MS
+  const alive = isProcessAlive(owner.pid)
+  return `held by pid ${owner.pid}${alive ? ' (running)' : ' (no longer running)'}`
 }
 
-// Remove an abandoned lock while holding exclusive reclamation rights. Returns
-// true if the lock was cleared. Never throws for ordinary contention.
-function reclaim(dir, now = Date.now) {
-  const lockPath = path.join(dir, LOCK_NAME)
-  const breakerPath = path.join(dir, BREAKER_NAME)
-  const token = mintToken()
-
+// Build the lock complete, then move it into place in one atomic step. A
+// partially built lock is never visible under the real name.
+function publish(dir, token, now) {
+  const staging = path.join(dir, `.lock.staging-${token}`)
+  fs.mkdirSync(staging, { recursive: true })
   try {
-    fs.mkdirSync(breakerPath)
+    fs.writeFileSync(path.join(staging, 'owner'), `${token} ${process.pid} ${now()}\n`, { flag: 'wx' })
+    fs.renameSync(staging, lockPathFor(dir))
+    return true
   } catch (error) {
-    if (error.code !== 'EEXIST') throw error
-    const age = directoryAge(breakerPath, now())
-    if (age !== null && age > BREAKER_STALE_MS) {
-      fs.rmSync(breakerPath, { recursive: true, force: true })
-    }
-    return false
-  }
-
-  try {
-    fs.writeFileSync(path.join(breakerPath, 'owner'), `${token} ${process.pid} ${now()}\n`)
-    // Sound because nothing else can alter `.lock` while we hold the breaker.
-    if (isAbandoned(lockPath, now())) {
-      fs.rmSync(lockPath, { recursive: true, force: true })
-      return true
-    }
-    return false
-  } finally {
-    const holder = readOwner(breakerPath)
-    if (!holder || holder.token === token) {
-      fs.rmSync(breakerPath, { recursive: true, force: true })
-    }
+    fs.rmSync(staging, { recursive: true, force: true })
+    // Someone else holds it. rename onto an existing directory reports these.
+    if (['EEXIST', 'ENOTEMPTY', 'EACCES', 'EPERM'].includes(error.code)) return false
+    throw error
   }
 }
 
 function acquire(dir, options = {}) {
   const now = options.now || Date.now
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const lockPath = path.join(dir, LOCK_NAME)
+  const lockPath = lockPathFor(dir)
   const deadline = now() + timeoutMs
   const token = mintToken()
 
   for (;;) {
-    try {
-      fs.mkdirSync(lockPath)
-      fs.writeFileSync(path.join(lockPath, 'owner'), `${token} ${process.pid} ${now()}\n`)
-      return { lockPath, token }
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
+    if (publish(dir, token, now)) return { lockPath, token }
 
-      // Checked before reclaiming, so repeated successful reclamations cannot
-      // extend the wait past the caller's timeout.
-      if (now() > deadline) {
-        throw new Error(`Timed out waiting for the Bubo store lock at ${lockPath}`)
-      }
-
-      if (isAbandoned(lockPath, now())) {
-        try {
-          reclaim(dir, now)
-        } catch (reclaimError) {
-          // A permission fault will never succeed; do not retry it in a loop.
-          throw new Error(
-            `Cannot reclaim an abandoned Bubo store lock at ${lockPath}: ${reclaimError.code || reclaimError.message}`
-          )
-        }
-      }
-
-      // Synchronous sleep: the store's callers are synchronous.
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
+    if (now() > deadline) {
+      throw new Error(
+        `Timed out waiting for the Bubo store lock at ${lockPath}\n` +
+        `  It is ${describeHolder(lockPath)}.\n` +
+        '  If that process is gone, clear it with: bubo unlock'
+      )
     }
+
+    // Synchronous sleep: the store's callers are synchronous.
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
   }
 }
 
-// Only remove the lock if it is still ours. If a reclaimer cleared it while we
-// worked and somebody else took it, deleting it would admit a second writer.
+// Release has to be as atomic as acquisition. Deleting the directory's contents
+// in place makes it briefly empty, and rename onto an *empty* directory succeeds
+// on POSIX — so a waiting acquirer could publish straight into the lock that is
+// being torn down, leaving two holders and an ENOTEMPTY on the way out.
+// Renaming the whole directory away frees the name in one step instead.
 function release(held) {
   if (!held) return
+
   const owner = readOwner(held.lockPath)
-  if (owner && owner.token === held.token) {
-    fs.rmSync(held.lockPath, { recursive: true, force: true })
+  if (owner && owner.token !== held.token) return // already someone else's
+
+  const retiring = `${held.lockPath}.releasing-${held.token}`
+  try {
+    fs.renameSync(held.lockPath, retiring)
+  } catch {
+    return // already gone
   }
+  fs.rmSync(retiring, { recursive: true, force: true })
 }
 
 function withLock(dir, fn, options = {}) {
@@ -190,18 +149,39 @@ function withLock(dir, fn, options = {}) {
   }
 }
 
+// Explicit, operator-driven recovery: the only way a lock is ever removed by
+// anyone other than its holder. Refuses while the owning process is running,
+// unless the caller insists.
+function unlock(dir, options = {}) {
+  const lockPath = lockPathFor(dir)
+  if (!fs.existsSync(lockPath)) return { cleared: false, reason: 'no lock held' }
+
+  const owner = readOwner(lockPath)
+  if (owner && isProcessAlive(owner.pid) && !options.force) {
+    return { cleared: false, reason: `pid ${owner.pid} is still running`, owner }
+  }
+
+  // Same atomicity requirement as release: free the name in one step so a
+  // waiting acquirer cannot publish into a half-dismantled lock.
+  const retiring = `${lockPath}.releasing-${mintToken()}`
+  try {
+    fs.renameSync(lockPath, retiring)
+  } catch {
+    return { cleared: false, reason: 'no lock held' }
+  }
+  fs.rmSync(retiring, { recursive: true, force: true })
+  return { cleared: true, owner }
+}
+
 module.exports = {
-  BREAKER_NAME,
-  BREAKER_STALE_MS,
+  DEFAULT_TIMEOUT_MS,
   LOCK_NAME,
-  MAX_HOLD_MS,
-  OWNERLESS_STALE_MS,
   acquire,
-  isAbandoned,
+  describeHolder,
   isProcessAlive,
   mintToken,
   readOwner,
-  reclaim,
   release,
+  unlock,
   withLock
 }

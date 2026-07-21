@@ -21,151 +21,168 @@ function plantLock(root, owner) {
   return lockPath
 }
 
-test('a lock owned by a live process is not abandoned', () => {
-  const root = makeProjectRoot('bubo-lock-live-')
+test('a published lock is complete the instant it is visible', () => {
+  const root = makeProjectRoot('bubo-lock-atomic-')
   ensureProjectState(root)
-  const lockPath = plantLock(root, `tok ${process.pid} ${Date.now()}`)
-  assert.equal(lock.isAbandoned(lockPath), false)
+  const held = lock.acquire(buboDir(root), { timeoutMs: 1000 })
+
+  // No window exists in which the directory is present without its owner: it is
+  // built under a private name and renamed into place in one step.
+  const owner = lock.readOwner(held.lockPath)
+  assert.ok(owner, 'owner is present as soon as the lock is')
+  assert.equal(owner.pid, process.pid)
+  assert.equal(owner.token, held.token)
+  assert.ok(Number.isFinite(owner.acquiredAt))
+  lock.release(held)
+  assert.equal(fs.existsSync(held.lockPath), false)
 })
 
-test('a lock owned by a dead process is abandoned', () => {
-  const root = makeProjectRoot('bubo-lock-dead-')
+test('no staging directory survives a successful acquire', () => {
+  const root = makeProjectRoot('bubo-lock-staging-')
   ensureProjectState(root)
-  const lockPath = plantLock(root, `tok ${DEAD_PID} ${Date.now()}`)
-  assert.equal(lock.isAbandoned(lockPath), true)
+  const held = lock.acquire(buboDir(root), { timeoutMs: 1000 })
+  lock.release(held)
+
+  const residue = fs.readdirSync(buboDir(root)).filter((n) => n.includes('staging'))
+  assert.deepEqual(residue, [])
 })
 
-// pids get recycled. A live pid that has supposedly held the lock for longer
-// than any real operation is far more likely an unrelated process that inherited
-// the number, and must not wedge the store until it happens to exit.
-test('a live pid holding far longer than any real operation is abandoned', () => {
-  const root = makeProjectRoot('bubo-lock-pidreuse-')
+test('a contended lock leaves no staging residue either', () => {
+  const root = makeProjectRoot('bubo-lock-staging-contended-')
   ensureProjectState(root)
-  const ancient = Date.now() - (lock.MAX_HOLD_MS + 60000)
-  const lockPath = plantLock(root, `tok ${process.pid} ${ancient}`)
-  assert.equal(lock.isAbandoned(lockPath), true)
+  plantLock(root, `tok ${process.pid} ${Date.now()}`)
+
+  assert.throws(() => lock.acquire(buboDir(root), { timeoutMs: 200 }), /Timed out/i)
+  const residue = fs.readdirSync(buboDir(root)).filter((n) => n.includes('staging'))
+  assert.deepEqual(residue, [])
 })
 
-test('an ownerless lock is abandoned only once it has aged', () => {
-  const root = makeProjectRoot('bubo-lock-ownerless-')
+// The whole point of the design: an abandoned lock is NEVER reclaimed
+// automatically, because every automatic scheme raced and admitted two writers.
+test('an abandoned lock is not reclaimed automatically', () => {
+  const root = makeProjectRoot('bubo-lock-noreclaim-')
   ensureProjectState(root)
-  const lockPath = plantLock(root, null)
+  const lockPath = plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
 
-  assert.equal(lock.isAbandoned(lockPath), false, 'a brand new ownerless lock may still be mid-creation')
-
-  const old = new Date(Date.now() - (lock.OWNERLESS_STALE_MS + 5000))
-  fs.utimesSync(lockPath, old, old)
-  assert.equal(lock.isAbandoned(lockPath), true)
+  assert.throws(() => lock.acquire(buboDir(root), { timeoutMs: 200 }), /Timed out/i)
+  assert.ok(fs.existsSync(lockPath), 'the stale lock is left in place, not silently removed')
 })
 
-// The blocking finding: two contenders that both observed the same dead lock
-// could each remove whatever occupied the path afterwards, including a lock a
-// third process had legitimately acquired in between. Reclamation under an
-// exclusive breaker makes the second reclaimer re-check and stand down.
-test('a second reclaimer does not evict the successor that replaced a dead lock', () => {
-  const root = makeProjectRoot('bubo-lock-two-breakers-')
+test('the timeout error says who holds it and how to clear it', () => {
+  const root = makeProjectRoot('bubo-lock-message-')
   ensureProjectState(root)
-  const dir = buboDir(root)
   plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
 
-  // Reclaimer A clears the dead lock, then a live holder takes it.
-  assert.equal(lock.reclaim(dir), true)
-  const successor = lock.acquire(dir, { timeoutMs: 1000 })
+  assert.throws(() => lock.acquire(buboDir(root), { timeoutMs: 150 }), (error) => {
+    assert.match(error.message, new RegExp(String(DEAD_PID)), 'names the owning pid')
+    assert.match(error.message, /no longer running/i, 'says whether it is alive')
+    assert.match(error.message, /bubo unlock/, 'says how to recover')
+    return true
+  })
+})
 
-  // Reclaimer B, still believing the lock is the dead one it saw earlier.
-  const evicted = lock.reclaim(dir)
+test('a live holder is reported as running', () => {
+  const root = makeProjectRoot('bubo-lock-livemsg-')
+  ensureProjectState(root)
+  plantLock(root, `tok ${process.pid} ${Date.now()}`)
 
-  assert.equal(evicted, false, 'B must not evict a live successor')
+  assert.match(lock.describeHolder(path.join(buboDir(root), lock.LOCK_NAME)), /running/)
+  assert.doesNotMatch(lock.describeHolder(path.join(buboDir(root), lock.LOCK_NAME)), /no longer/)
+})
+
+// A holder is never evicted for taking too long. Earlier designs bounded holds
+// to guard against pid reuse and evicted confirmed-live holders as a result.
+test('a live holder is never evicted, however long it has held', () => {
+  const root = makeProjectRoot('bubo-lock-longhold-')
+  ensureProjectState(root)
+  const ancient = Date.now() - 86400000 // a day
+  const lockPath = plantLock(root, `tok ${process.pid} ${ancient}`)
+
+  assert.throws(() => lock.acquire(buboDir(root), { timeoutMs: 200 }), /Timed out/i)
+  assert.ok(fs.existsSync(lockPath))
+  assert.equal(lock.readOwner(lockPath).pid, process.pid)
+})
+
+test('unlock refuses while the owning process is alive', () => {
+  const root = makeProjectRoot('bubo-unlock-live-')
+  ensureProjectState(root)
+  const lockPath = plantLock(root, `tok ${process.pid} ${Date.now()}`)
+
+  const result = lock.unlock(buboDir(root))
+  assert.equal(result.cleared, false)
+  assert.match(result.reason, /still running/)
+  assert.ok(fs.existsSync(lockPath))
+})
+
+test('unlock clears a lock whose owner is gone', () => {
+  const root = makeProjectRoot('bubo-unlock-dead-')
+  ensureProjectState(root)
+  const lockPath = plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
+
+  assert.equal(lock.unlock(buboDir(root)).cleared, true)
+  assert.equal(fs.existsSync(lockPath), false)
+})
+
+test('unlock --force overrides a live owner', () => {
+  const root = makeProjectRoot('bubo-unlock-force-')
+  ensureProjectState(root)
+  plantLock(root, `tok ${process.pid} ${Date.now()}`)
+
+  assert.equal(lock.unlock(buboDir(root), { force: true }).cleared, true)
+})
+
+test('unlock on an unlocked store is a no-op', () => {
+  const root = makeProjectRoot('bubo-unlock-none-')
+  ensureProjectState(root)
+  const result = lock.unlock(buboDir(root))
+  assert.equal(result.cleared, false)
+  assert.equal(result.reason, 'no lock held')
+})
+
+test('after unlock, writers proceed normally', () => {
+  const root = makeProjectRoot('bubo-unlock-then-write-')
+  ensureProjectState(root)
+  plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
+  lock.unlock(buboDir(root))
+
+  const created = createReview(root, {
+    reason: 'manual', rendered: 'x', problem: 'p', evidence: 'e', solution: 's', context: {}
+  })
+  assert.equal(created.id, 1)
+})
+
+test('only one of two acquirers holds the lock at a time', () => {
+  const root = makeProjectRoot('bubo-lock-exclusive-')
+  ensureProjectState(root)
+  const dir = buboDir(root)
+
+  const first = lock.acquire(dir, { timeoutMs: 500 })
+  assert.throws(() => lock.acquire(dir, { timeoutMs: 200 }), /Timed out/i)
+  lock.release(first)
+
+  const second = lock.acquire(dir, { timeoutMs: 500 })
+  assert.equal(lock.readOwner(second.lockPath).token, second.token)
+  lock.release(second)
+})
+
+test('releasing a lock that was force-cleared does not delete a successor', () => {
+  const root = makeProjectRoot('bubo-lock-successor-')
+  ensureProjectState(root)
+  const dir = buboDir(root)
+
+  const first = lock.acquire(dir, { timeoutMs: 500 })
+  lock.unlock(dir, { force: true })
+  const successor = lock.acquire(dir, { timeoutMs: 500 })
+
+  lock.release(first) // stale handle
   assert.ok(fs.existsSync(successor.lockPath), 'the successor still holds the lock')
   assert.equal(lock.readOwner(successor.lockPath).token, successor.token)
   lock.release(successor)
 })
 
-test('reclamation leaves no breaker behind', () => {
-  const root = makeProjectRoot('bubo-lock-breaker-clean-')
+test('concurrent writers never share an id', () => {
+  const root = makeProjectRoot('bubo-lock-concurrent-')
   ensureProjectState(root)
-  const dir = buboDir(root)
-  plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
-
-  lock.reclaim(dir)
-  assert.equal(fs.existsSync(path.join(dir, lock.BREAKER_NAME)), false)
-})
-
-test('a live holder is waited on, then the caller times out', () => {
-  const root = makeProjectRoot('bubo-lock-timeout-')
-  ensureProjectState(root)
-  plantLock(root, `tok ${process.pid} ${Date.now()}`)
-
-  const started = Date.now()
-  assert.throws(
-    () => lock.acquire(buboDir(root), { timeoutMs: 300 }),
-    /Timed out waiting for the Bubo store lock/i
-  )
-  assert.ok(Date.now() - started < 5000, 'gave up promptly rather than spinning')
-})
-
-// Repeated successful reclamations used to `continue` past the deadline check,
-// so a pathological store could hold a caller well beyond its stated timeout.
-test('repeated reclamation cannot outlast the caller timeout', () => {
-  const root = makeProjectRoot('bubo-lock-deadline-')
-  ensureProjectState(root)
-  const dir = buboDir(root)
-
-  // Reclamation used to run before the deadline was consulted, so a store whose
-  // lock kept being replaced could hold a caller past its stated timeout. The
-  // observable invariant is the ordering: once the deadline has passed, acquire
-  // gives up WITHOUT attempting to reclaim. An abandoned lock left untouched
-  // after the throw is the proof.
-  const lockPath = plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
-
-  const base = Date.now()
-  let calls = 0
-  const now = () => {
-    calls += 1
-    return calls === 1 ? base : base + 100000 // first call sets the deadline
-  }
-
-  assert.throws(
-    () => lock.acquire(dir, { timeoutMs: 400, now }),
-    /Timed out waiting for the Bubo store lock/i
-  )
-  assert.ok(
-    fs.existsSync(lockPath),
-    'an expired caller must not reclaim; the deadline is checked first'
-  )
-  fs.rmSync(lockPath, { recursive: true, force: true })
-})
-
-// Runtime and repair must speak one protocol. Repair holding the lock has to
-// look held to the runtime, and vice versa.
-test('runtime and repair agree on what a held lock looks like', () => {
-  const root = makeProjectRoot('bubo-lock-protocol-')
-  ensureProjectState(root)
-  const dir = buboDir(root)
-
-  const held = lock.acquire(dir, { timeoutMs: 1000 })
-  const owner = lock.readOwner(held.lockPath)
-
-  assert.equal(owner.pid, process.pid, 'owner records the pid')
-  assert.ok(Number.isFinite(owner.acquiredAt), 'owner records acquisition time')
-  assert.equal(lock.isAbandoned(held.lockPath), false)
-
-  // The repair tool loads this very module, so there is one implementation.
-  const repairLock = require('../tools/repair-bubo-ids')
-  assert.ok(repairLock, 'repair tool loads')
-
-  assert.throws(
-    () => lock.acquire(dir, { timeoutMs: 200 }),
-    /Timed out/i,
-    'a second acquirer must not walk over a live holder'
-  )
-  lock.release(held)
-})
-
-test('concurrent writers reclaiming a dead lock still get unique ids', () => {
-  const root = makeProjectRoot('bubo-lock-reclaim-race-')
-  ensureProjectState(root)
-  plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
 
   const storePath = path.join(__dirname, '..', 'scripts', 'lib', 'store.js')
   const gate = path.join(root, 'go')
@@ -173,8 +190,6 @@ test('concurrent writers reclaiming a dead lock still get unique ids', () => {
     const fs = require('node:fs')
     const { createReview } = require(${JSON.stringify(storePath)})
     const [root, gate] = process.argv.slice(1)
-    // Bounded: a worker must never outlive its parent spinning on a gate that
-    // will not arrive.
     const giveUpAt = Date.now() + 30000
     while (!fs.existsSync(gate)) {
       if (Date.now() > giveUpAt) throw new Error('barrier never opened')
@@ -182,16 +197,23 @@ test('concurrent writers reclaiming a dead lock still get unique ids', () => {
     }
     for (let i = 0; i < 5; i += 1) {
       createReview(root, {
-        reason: 'manual', rendered: 'reclaim', problem: 'p', evidence: 'e', solution: 's', context: {}
+        reason: 'manual', rendered: 'c', problem: 'p', evidence: 'e', solution: 's', context: {}
       })
     }
   `
 
   const workers = Array.from({ length: 6 }, () =>
     new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['-e', worker, root, gate], { stdio: 'ignore' })
+      const child = spawn(process.execPath, ['-e', worker, root, gate], {
+        stdio: ['ignore', 'ignore', 'pipe']
+      })
+      let stderr = ''
+      child.stderr.on('data', (chunk) => { stderr += chunk })
       child.on('error', reject)
-      child.on('exit', (code) => (code === 0 ? resolve() : reject(new Error(`worker exit ${code}`))))
+      // Surface the worker's own error; "exit 1" alone is undebuggable.
+      child.on('exit', (code) => (
+        code === 0 ? resolve() : reject(new Error(`worker exit ${code}: ${stderr.trim()}`))
+      ))
     })
   )
 
@@ -203,15 +225,4 @@ test('concurrent writers reclaiming a dead lock still get unique ids', () => {
       assert.equal(ids.length, 30, 'no writer lost its append')
       assert.equal(new Set(ids).size, 30, `ids collided: ${ids.join(', ')}`)
     })
-})
-
-test('createReview still works after reclaiming a dead lock', () => {
-  const root = makeProjectRoot('bubo-lock-reclaim-simple-')
-  ensureProjectState(root)
-  plantLock(root, `dead ${DEAD_PID} ${Date.now()}`)
-
-  const created = createReview(root, {
-    reason: 'manual', rendered: 'x', problem: 'p', evidence: 'e', solution: 's', context: {}
-  })
-  assert.equal(created.id, 1)
 })

@@ -145,9 +145,13 @@ function rewriteReviews(root, reviews, options = {}) {
     fs.writeFileSync(handle, payload ? `${payload}\n` : '')
     // rename gives atomic visibility, not durability; flush before publishing.
     fs.fsyncSync(handle)
-  } finally {
+  } catch (error) {
+    // A write or flush failure must not strand the staged file.
     fs.closeSync(handle)
+    fs.rmSync(tmp, { force: true })
+    throw error
   }
+  fs.closeSync(handle)
 
   try {
     fs.renameSync(tmp, file)

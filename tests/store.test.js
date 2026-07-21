@@ -171,7 +171,9 @@ test('concurrent createReview calls never share an id', () => {
     })
 })
 
-// --- Review findings: concurrency and lock correctness ---
+// --- Review findings: concurrency and store correctness ---
+// Lock semantics themselves are covered in tests/lock.test.js; these cover the
+// store behaviour built on top of it.
 
 // ensureProjectState ran outside the lock and initialized files with a
 // non-exclusive existsSync/writeFileSync. Two first writers could both see "no
@@ -220,40 +222,21 @@ test('concurrent first use never truncates the store or duplicates id 1', () => 
 // A crash between creating the lock and writing its owner file left a lock with
 // no recorded holder. Staleness was read from the owner file, so an ownerless
 // lock was never stale and every later writer timed out forever.
-test('a lock with no owner record is eventually broken, not deadlocked', () => {
-  const root = makeProjectRoot('bubo-ownerless-lock-')
+// An abandoned lock is never reclaimed automatically, so the store surfaces the
+// actionable error rather than silently proceeding or hanging.
+test('a store held by an abandoned lock reports how to recover', () => {
+  const root = makeProjectRoot('bubo-store-stale-lock-')
   ensureProjectState(root)
   const lockPath = path.join(root, '.bubo', '.lock')
   fs.mkdirSync(lockPath)
-  // Backdate past the stale threshold so the test does not sit through it.
-  const longAgo = new Date(Date.now() - 60000)
-  fs.utimesSync(lockPath, longAgo, longAgo)
+  fs.writeFileSync(path.join(lockPath, 'owner'), `tok 4194304 ${Date.now()}\n`)
 
-  const created = createReview(root, makePayload('after ownerless lock'))
-  assert.equal(created.id, 1)
-  assert.equal(readReviews(root).length, 1)
-})
-
-// Breaking a stale lock used a blind recursive delete, so a contender could
-// remove a lock another contender had just legitimately acquired, and the
-// original holder's release could delete its successor's lock.
-test('releasing a lock does not delete a successor lock', () => {
-  const root = makeProjectRoot('bubo-lock-ownership-')
-  ensureProjectState(root)
-  const lockPath = path.join(root, '.bubo', '.lock')
-
-  let observed = null
-  withLock(root, () => {
-    // Simulate a stale-breaker taking over mid-hold: the lock we are about to
-    // release is no longer ours.
-    fs.rmSync(lockPath, { recursive: true, force: true })
-    fs.mkdirSync(lockPath)
-    fs.writeFileSync(path.join(lockPath, 'owner'), 'someone-else 0\n')
-    observed = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8')
-  })
-
-  assert.ok(fs.existsSync(lockPath), 'successor lock must survive our release')
-  assert.equal(fs.readFileSync(path.join(lockPath, 'owner'), 'utf8'), observed)
+  assert.throws(
+    () => withLock(root, () => 'nope', { timeoutMs: 200 }),
+    /bubo unlock/,
+    'the error must tell the operator how to clear it'
+  )
+  assert.ok(fs.existsSync(lockPath), 'and must not silently remove it')
   fs.rmSync(lockPath, { recursive: true, force: true })
 })
 
@@ -270,67 +253,6 @@ test('id allocation refuses to run past the safe integer ceiling', () => {
 // Time alone is a bad staleness signal: a holder doing legitimate slow work is
 // declared dead at the threshold and has the store taken from under it. Liveness
 // of the owning process is the signal that actually means "abandoned".
-test('a lock held by a live process is never broken, however old', () => {
-  const root = makeProjectRoot('bubo-lock-live-')
-  ensureProjectState(root)
-  const lockPath = path.join(root, '.bubo', '.lock')
-  fs.mkdirSync(lockPath)
-  // Owned by THIS process, which is definitionally alive.
-  fs.writeFileSync(path.join(lockPath, 'owner'), `sometoken ${process.pid}\n`)
-  const longAgo = new Date(Date.now() - 600000)
-  fs.utimesSync(lockPath, longAgo, longAgo)
-
-  assert.throws(
-    () => withLock(root, () => 'should not run', { timeoutMs: 300 }),
-    /Timed out waiting for the Bubo store lock/i,
-    'a live holder must not be evicted'
-  )
-  assert.ok(fs.existsSync(lockPath), 'the live holder still owns the lock')
-  fs.rmSync(lockPath, { recursive: true, force: true })
-})
-
-test('a lock whose owning process is gone is broken promptly', () => {
-  const root = makeProjectRoot('bubo-lock-dead-')
-  ensureProjectState(root)
-  const lockPath = path.join(root, '.bubo', '.lock')
-  fs.mkdirSync(lockPath)
-  // PID 2^22 is above the default pid_max, so it cannot be running.
-  fs.writeFileSync(path.join(lockPath, 'owner'), `sometoken 4194304\n`)
-
-  const created = createReview(root, makePayload('after dead holder'))
-  assert.equal(created.id, 1)
-})
-
-// A stale-break that keeps failing (EACCES on a read-only parent, say) used to
-// `continue` straight back to the top, skipping both the deadline check and the
-// sleep, and spin a core until the process was killed.
-test('a stale break that cannot succeed still honours the deadline', () => {
-  const root = makeProjectRoot('bubo-lock-spin-')
-  ensureProjectState(root)
-  const bubo = path.join(root, '.bubo')
-  const lockPath = path.join(bubo, '.lock')
-  fs.mkdirSync(lockPath)
-  fs.writeFileSync(path.join(lockPath, 'owner'), `sometoken 4194304\n`)
-  // Read-only parent: the rename that would claim the stale lock cannot land.
-  fs.chmodSync(bubo, 0o555)
-
-  const started = Date.now()
-  try {
-    assert.throws(
-      () => withLock(root, () => 'nope', { timeoutMs: 400 }),
-      /Timed out waiting for the Bubo store lock|EACCES|EPERM/i
-    )
-    const elapsed = Date.now() - started
-    assert.ok(elapsed < 5000, `gave up in ${elapsed}ms rather than spinning`)
-  } finally {
-    fs.chmodSync(bubo, 0o755)
-    fs.rmSync(lockPath, { recursive: true, force: true })
-  }
-})
-
-// rewriteReviews truncates the canonical file before writing it. A kill or a
-// full disk mid-write leaves partial JSONL: history is lost, and with it the
-// high-water mark, so ids start being reissued.
 test('a failed rewrite leaves the original store intact', () => {
   const root = makeProjectRoot('bubo-rewrite-atomic-')
   createReview(root, makePayload('one'))
