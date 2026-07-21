@@ -137,7 +137,13 @@ test('concurrent createReview calls never share an id', () => {
     const fs = require('node:fs')
     const { createReview } = require(${JSON.stringify(storePath)})
     const [root, gate] = process.argv.slice(1)
-    while (!fs.existsSync(gate)) { /* spin until released */ }
+    // Bounded: a worker must never outlive its parent spinning on a gate that
+    // will not arrive.
+    const giveUpAt = Date.now() + 30000
+    while (!fs.existsSync(gate)) {
+      if (Date.now() > giveUpAt) throw new Error('barrier never opened')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2)
+    }
     for (let i = 0; i < 20; i += 1) {
       createReview(root, {
         reason: 'manual', rendered: 'race', problem: 'p', evidence: 'e', solution: 's', context: {}
@@ -181,7 +187,13 @@ test('concurrent first use never truncates the store or duplicates id 1', () => 
     const fs = require('node:fs')
     const { createReview } = require(${JSON.stringify(storePath)})
     const [root, gate] = process.argv.slice(1)
-    while (!fs.existsSync(gate)) {}
+    // Bounded: a worker must never outlive its parent spinning on a gate that
+    // will not arrive.
+    const giveUpAt = Date.now() + 30000
+    while (!fs.existsSync(gate)) {
+      if (Date.now() > giveUpAt) throw new Error('barrier never opened')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2)
+    }
     createReview(root, {
       reason: 'manual', rendered: 'first-use', problem: 'p', evidence: 'e', solution: 's', context: {}
     })

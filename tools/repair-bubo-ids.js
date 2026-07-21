@@ -106,7 +106,7 @@ function planRepair(raw) {
   // Records whose id could never be addressed get a real one regardless of
   // whether they collide with anything.
   unusable.sort(compareEntries).forEach((entry) => {
-    if (nextId >= Number.MAX_SAFE_INTEGER) {
+    if (nextId > Number.MAX_SAFE_INTEGER) {
       throw new Error('Cannot repair: reassignment would exceed the safe integer ceiling')
     }
     reassignments.push({ from: entry.review.id, to: nextId, entry })
@@ -127,7 +127,7 @@ function planRepair(raw) {
         .filter((entry) => entry !== keeper)
         .sort(compareEntries)
         .forEach((entry) => {
-          if (nextId >= Number.MAX_SAFE_INTEGER) {
+          if (nextId > Number.MAX_SAFE_INTEGER) {
             throw new Error('Cannot repair: reassignment would exceed the safe integer ceiling')
           }
           reassignments.push({ from: id, to: nextId, entry })
@@ -160,7 +160,10 @@ function applyRepair(raw) {
     return JSON.stringify({ ...item.entry.review, id: replacement })
   })
 
-  return { plan, content: lines.length ? `${lines.join('\n')}\n` : '' }
+  // Preserve the input's own trailing-newline convention: appending one
+  // unconditionally makes a non-newline-terminated store non-verbatim.
+  const trailing = raw.endsWith('\n') || raw === '' ? '\n' : ''
+  return { plan, content: lines.length ? `${lines.join('\n')}${trailing}` : '' }
 }
 
 // state.json is deliberately NOT touched. Its nextId is vestigial — allocation
@@ -198,52 +201,12 @@ function findStores(root, depth = 4) {
   return found
 }
 
-// The same .bubo/.lock protocol the store uses, reimplemented here so the tool
-// stays standalone. Without it, repair's read-backup-replace races a live
-// session's append and silently drops the review written mid-repair.
-function acquireStoreLock(buboDir, timeoutMs = 15000) {
-  const lockPath = path.join(buboDir, '.lock')
-  const token = `repair-${process.pid}-${Math.random().toString(36).slice(2)}`
-  const deadline = Date.now() + timeoutMs
-
-  for (;;) {
-    try {
-      fs.mkdirSync(lockPath)
-      fs.writeFileSync(path.join(lockPath, 'owner'), `${token}\n`)
-      return { lockPath, token }
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-      let heldSince = 0
-      try {
-        heldSince = fs.statSync(lockPath).mtimeMs
-      } catch {
-        continue
-      }
-      if (Date.now() - heldSince > 10000) {
-        try {
-          fs.renameSync(lockPath, `${lockPath}.stale-${token}`)
-        } catch {
-          // Lost the race to claim it; retry.
-        }
-        continue
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`Timed out waiting for the Bubo store lock at ${lockPath}. Is a session writing?`)
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
-    }
-  }
-}
-
-function releaseStoreLock({ lockPath, token }) {
-  let owner = null
-  try {
-    owner = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').trim()
-  } catch {
-    return
-  }
-  if (owner === token) fs.rmSync(lockPath, { recursive: true, force: true })
-}
+// The lock protocol is shared with the runtime rather than reimplemented here:
+// two copies drifted apart once already (token-only owners and age-based
+// eviction on this side, `token pid` owners and liveness on the other), so each
+// would evict the other mid-write. This does mean the tool needs the repo
+// checkout alongside it; it is still not a plugin subcommand.
+const lock = require('../scripts/lib/lock')
 
 // Refuse to work through a symlink. The store and its backup are predictable
 // paths; following a link would let a planted symlink redirect the backup write
@@ -279,7 +242,7 @@ function repairStore(store, write, options = {}) {
   // Hold the store lock across the whole transaction: re-read under the lock so
   // a review appended between the dry-run read and now is included rather than
   // overwritten, then back up and replace.
-  const held = acquireStoreLock(store.dir, options.lockTimeoutMs)
+  const held = lock.acquire(store.dir, { timeoutMs: options.lockTimeoutMs })
   try {
     const fresh = fs.readFileSync(store.reviews, 'utf8')
     const locked = applyRepair(fresh)
@@ -305,7 +268,7 @@ function repairStore(store, write, options = {}) {
     summary.backup = backup
     return summary
   } finally {
-    releaseStoreLock(held)
+    lock.release(held)
   }
 }
 
