@@ -12,12 +12,15 @@ const path = require('node:path')
 // other's reviews, ids continue across cases that expect to start at 1, and the
 // suite passes or fails depending on the machine it runs on.
 //
-// Planting an empty `.git` marker makes the temp directory itself the nearest
-// project root, so resolution stops here. Tests that need a real repository can
-// still run `git init` over it.
+// Planting a marker makes the temp directory itself the nearest project root, so
+// resolution stops here. It must be a *valid* marker — a `.git` directory
+// holding HEAD — because resolveProjectRoot deliberately rejects an empty `.git`
+// (that is the very fault this isolation works around). Tests that need a real
+// repository can still run `git init` over it.
 function makeProjectRoot(prefix) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
   fs.mkdirSync(path.join(root, '.git'), { recursive: true })
+  fs.writeFileSync(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n')
   return root
 }
 
