@@ -8,8 +8,10 @@
 // came first — usually a long-stale note.
 //
 // This script reassigns ids so every record is uniquely addressable again.
-// It is deliberately self-contained: no dependency on the Bubo plugin, so it
-// can be run against any checkout or copied to another machine.
+// It is not a plugin subcommand — run it directly — but it is NOT copyable on
+// its own: it shares ../scripts/lib/lock.js with the runtime, because two
+// implementations of one lock protocol drifted into evicting each other. Keep
+// it alongside the repo checkout.
 //
 //   node tools/repair-bubo-ids.js <project-or-.bubo-path>...   # dry run
 //   node tools/repair-bubo-ids.js --scan ~/programming          # find stores
@@ -27,11 +29,30 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
+// An id is only usable if `implement <id>` can address it: a positive safe
+// integer. Anything else — missing, a string, null, zero, negative, beyond the
+// safe range — leaves the record permanently unreachable and must be reassigned.
+function hasUsableId(review) {
+  return Number.isSafeInteger(review.id) && review.id > 0
+}
+
+// Every line is retained with its original index, including blank ones, so the
+// file can be rebuilt byte-for-byte apart from the ids that actually change.
 function parseStore(raw) {
   const records = []
   const damaged = []
+  const blanks = []
 
-  raw.split('\n').filter(Boolean).forEach((line, index) => {
+  const lines = raw.split('\n')
+  // A trailing newline yields a final empty element that is not a real line.
+  if (lines.length && lines[lines.length - 1] === '') lines.pop()
+
+  lines.forEach((line, index) => {
+    if (!line.trim()) {
+      blanks.push({ line, index })
+      return
+    }
+
     let review
     try {
       review = JSON.parse(line)
@@ -49,7 +70,7 @@ function parseStore(raw) {
     records.push({ review, line, index })
   })
 
-  return { records, damaged }
+  return { records, damaged, blanks }
 }
 
 // Timestamp first so reassignment follows real chronology; file order breaks
@@ -63,21 +84,36 @@ function compareEntries(a, b) {
 }
 
 function planRepair(raw) {
-  const { records, damaged } = parseStore(raw)
+  const { records, damaged, blanks } = parseStore(raw)
+
+  const usable = records.filter((entry) => hasUsableId(entry.review))
+  const unusable = records.filter((entry) => !hasUsableId(entry.review))
 
   const groups = new Map()
-  records.forEach((entry) => {
+  usable.forEach((entry) => {
     const id = entry.review.id
     if (!groups.has(id)) groups.set(id, [])
     groups.get(id).push(entry)
   })
 
-  const numericIds = records
-    .map((entry) => entry.review.id)
-    .filter((id) => Number.isSafeInteger(id))
-  let nextId = numericIds.length ? Math.max(...numericIds) + 1 : 1
+  // reduce, not Math.max(...ids): spreading a large store exceeds the argument
+  // limit and throws RangeError (reproducible at 150k records).
+  let nextId = records.reduce(
+    (max, entry) => (hasUsableId(entry.review) && entry.review.id > max ? entry.review.id : max),
+    0
+  ) + 1
 
   const reassignments = []
+
+  // Records whose id could never be addressed get a real one regardless of
+  // whether they collide with anything.
+  unusable.sort(compareEntries).forEach((entry) => {
+    if (nextId > Number.MAX_SAFE_INTEGER) {
+      throw new Error('Cannot repair: reassignment would exceed the safe integer ceiling')
+    }
+    reassignments.push({ from: entry.review.id, to: nextId, entry })
+    nextId += 1
+  })
 
   Array.from(groups.entries())
     .filter(([, entries]) => entries.length > 1)
@@ -93,7 +129,7 @@ function planRepair(raw) {
         .filter((entry) => entry !== keeper)
         .sort(compareEntries)
         .forEach((entry) => {
-          if (nextId >= Number.MAX_SAFE_INTEGER) {
+          if (nextId > Number.MAX_SAFE_INTEGER) {
             throw new Error('Cannot repair: reassignment would exceed the safe integer ceiling')
           }
           reassignments.push({ from: id, to: nextId, entry })
@@ -101,57 +137,41 @@ function planRepair(raw) {
         })
     })
 
-  return { records, damaged, reassignments, nextId, duplicateIds:
+  return { records, damaged, blanks, reassignments, nextId, duplicateIds:
     Array.from(groups.values()).filter((entries) => entries.length > 1).length }
 }
 
+// Repair is a minimal edit: only the lines whose id actually changes are
+// reserialized. Everything else — untouched records, damaged lines, blank
+// lines — is written back exactly as it was read, so a store comes out
+// byte-identical apart from the ids that had to move.
 function applyRepair(raw) {
   const plan = planRepair(raw)
   const newIdByIndex = new Map(plan.reassignments.map((r) => [r.entry.index, r.to]))
 
-  // Rebuild in original file order, so the append-only history stays readable.
-  const lines = []
   const all = [
     ...plan.records.map((entry) => ({ index: entry.index, entry, kind: 'record' })),
-    ...plan.damaged.map((entry) => ({ index: entry.index, entry, kind: 'damaged' }))
+    ...plan.damaged.map((entry) => ({ index: entry.index, entry, kind: 'verbatim' })),
+    ...plan.blanks.map((entry) => ({ index: entry.index, entry, kind: 'verbatim' }))
   ].sort((a, b) => a.index - b.index)
 
-  all.forEach((item) => {
-    if (item.kind === 'damaged') {
-      lines.push(item.entry.line)
-      return
-    }
-    const review = item.entry.review
+  const lines = all.map((item) => {
+    if (item.kind === 'verbatim') return item.entry.line
     const replacement = newIdByIndex.get(item.entry.index)
-    lines.push(JSON.stringify(replacement ? { ...review, id: replacement } : review))
+    if (!replacement) return item.entry.line
+    return JSON.stringify({ ...item.entry.review, id: replacement })
   })
 
-  return { plan, content: lines.length ? `${lines.join('\n')}\n` : '' }
+  // Preserve the input's own trailing-newline convention: appending one
+  // unconditionally makes a non-newline-terminated store non-verbatim.
+  const trailing = raw.endsWith('\n') || raw === '' ? '\n' : ''
+  return { plan, content: lines.length ? `${lines.join('\n')}${trailing}` : '' }
 }
 
-// state.json's nextId is vestigial once ids come from reviews.jsonl; leaving a
-// stale counter behind only invites confusion about which file is authoritative.
-function pruneState(statePath, write) {
-  if (!fs.existsSync(statePath)) return null
-
-  let state
-  try {
-    state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-  } catch {
-    return { corrupt: true }
-  }
-
-  if (!('nextId' in state)) return null
-  delete state.nextId
-
-  if (write) {
-    const tmp = `${statePath}.${process.pid}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n')
-    fs.renameSync(tmp, statePath)
-  }
-
-  return { prunedNextId: true }
-}
+// state.json is deliberately NOT touched. Its nextId is vestigial — allocation
+// reads reviews.jsonl — and rewriting it here would race session and cooldown
+// writers, which take no lock at all, silently discarding an explicit bubo
+// stop or a cooldown update.
 
 function resolveStore(target) {
   const asBubo = path.basename(target) === '.bubo' ? target : path.join(target, '.bubo')
@@ -183,52 +203,12 @@ function findStores(root, depth = 4) {
   return found
 }
 
-// The same .bubo/.lock protocol the store uses, reimplemented here so the tool
-// stays standalone. Without it, repair's read-backup-replace races a live
-// session's append and silently drops the review written mid-repair.
-function acquireStoreLock(buboDir, timeoutMs = 15000) {
-  const lockPath = path.join(buboDir, '.lock')
-  const token = `repair-${process.pid}-${Math.random().toString(36).slice(2)}`
-  const deadline = Date.now() + timeoutMs
-
-  for (;;) {
-    try {
-      fs.mkdirSync(lockPath)
-      fs.writeFileSync(path.join(lockPath, 'owner'), `${token}\n`)
-      return { lockPath, token }
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-      let heldSince = 0
-      try {
-        heldSince = fs.statSync(lockPath).mtimeMs
-      } catch {
-        continue
-      }
-      if (Date.now() - heldSince > 10000) {
-        try {
-          fs.renameSync(lockPath, `${lockPath}.stale-${token}`)
-        } catch {
-          // Lost the race to claim it; retry.
-        }
-        continue
-      }
-      if (Date.now() > deadline) {
-        throw new Error(`Timed out waiting for the Bubo store lock at ${lockPath}. Is a session writing?`)
-      }
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
-    }
-  }
-}
-
-function releaseStoreLock({ lockPath, token }) {
-  let owner = null
-  try {
-    owner = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').trim()
-  } catch {
-    return
-  }
-  if (owner === token) fs.rmSync(lockPath, { recursive: true, force: true })
-}
+// The lock protocol is shared with the runtime rather than reimplemented here:
+// two copies drifted apart once already (token-only owners and age-based
+// eviction on this side, `token pid` owners and liveness on the other), so each
+// would evict the other mid-write. This does mean the tool needs the repo
+// checkout alongside it; it is still not a plugin subcommand.
+const lock = require('../scripts/lib/lock')
 
 // Refuse to work through a symlink. The store and its backup are predictable
 // paths; following a link would let a planted symlink redirect the backup write
@@ -264,7 +244,7 @@ function repairStore(store, write, options = {}) {
   // Hold the store lock across the whole transaction: re-read under the lock so
   // a review appended between the dry-run read and now is included rather than
   // overwritten, then back up and replace.
-  const held = acquireStoreLock(store.dir, options.lockTimeoutMs)
+  const held = lock.acquire(store.dir, { timeoutMs: options.lockTimeoutMs })
   try {
     const fresh = fs.readFileSync(store.reviews, 'utf8')
     const locked = applyRepair(fresh)
@@ -288,10 +268,9 @@ function repairStore(store, write, options = {}) {
     fs.renameSync(tmp, store.reviews)
 
     summary.backup = backup
-    summary.state = pruneState(path.join(store.dir, 'state.json'), true)
     return summary
   } finally {
-    releaseStoreLock(held)
+    lock.release(held)
   }
 }
 

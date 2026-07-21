@@ -7,7 +7,8 @@ const { execSync } = require('node:child_process')
 const { renderReviewLine, normalizeReview } = require('./lib/render')
 const { generateReview } = require('./lib/generate')
 const { resolveProjectRoot } = require('./lib/project')
-const { createReview, ensureProjectState, readConfig, readReviews, readState, writeState } = require('./lib/store')
+const { buboDir, createReview, ensureProjectState, readConfig, readReviews, readState, writeState } = require('./lib/store')
+const lock = require('./lib/lock')
 const { considerReview, promoteReview } = require('./lib/promote')
 const { shouldTriggerReview } = require('./lib/trigger')
 const { installClaude } = require('./lib/install-claude')
@@ -265,6 +266,30 @@ function runRecord(options) {
   })
 }
 
+// A crashed session leaves its lock behind: the store never reclaims one
+// automatically, because every automatic scheme raced and admitted two writers.
+// This is the explicit, operator-driven recovery path.
+function runUnlock(options) {
+  const projectRoot = resolveProjectRoot(options.project || process.cwd())
+  const result = lock.unlock(buboDir(projectRoot), { force: Boolean(options.force) })
+
+  if (result.cleared) {
+    process.stdout.write(`Cleared the Bubo store lock in ${projectRoot}.\n`)
+    return 0
+  }
+
+  if (result.reason === 'no lock held') {
+    process.stdout.write(`No Bubo store lock is held in ${projectRoot}.\n`)
+    return 0
+  }
+
+  process.stderr.write(
+    `Refusing to clear the Bubo store lock in ${projectRoot}: ${result.reason}.\n` +
+    '  Wait for it to finish, or re-run with --force if you are certain.\n'
+  )
+  return 1
+}
+
 function runInstallClaude(options) {
   const projectRoot = resolveProjectRoot(options.project || process.cwd())
   const { settingsPath, commandPath } = installClaude(projectRoot)
@@ -352,6 +377,10 @@ async function main(argv) {
 
   if (command === 'session') {
     return runSession(positionals, options)
+  }
+
+  if (command === 'unlock') {
+    return runUnlock(options)
   }
 
   if (command === 'install') {

@@ -13,6 +13,7 @@ const {
   createReview,
   readReviews,
   readState,
+  rewriteReviews,
   withLock
 } = require('../scripts/lib/store')
 
@@ -136,7 +137,13 @@ test('concurrent createReview calls never share an id', () => {
     const fs = require('node:fs')
     const { createReview } = require(${JSON.stringify(storePath)})
     const [root, gate] = process.argv.slice(1)
-    while (!fs.existsSync(gate)) { /* spin until released */ }
+    // Bounded: a worker must never outlive its parent spinning on a gate that
+    // will not arrive.
+    const giveUpAt = Date.now() + 30000
+    while (!fs.existsSync(gate)) {
+      if (Date.now() > giveUpAt) throw new Error('barrier never opened')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2)
+    }
     for (let i = 0; i < 20; i += 1) {
       createReview(root, {
         reason: 'manual', rendered: 'race', problem: 'p', evidence: 'e', solution: 's', context: {}
@@ -164,7 +171,9 @@ test('concurrent createReview calls never share an id', () => {
     })
 })
 
-// --- Review findings: concurrency and lock correctness ---
+// --- Review findings: concurrency and store correctness ---
+// Lock semantics themselves are covered in tests/lock.test.js; these cover the
+// store behaviour built on top of it.
 
 // ensureProjectState ran outside the lock and initialized files with a
 // non-exclusive existsSync/writeFileSync. Two first writers could both see "no
@@ -180,7 +189,13 @@ test('concurrent first use never truncates the store or duplicates id 1', () => 
     const fs = require('node:fs')
     const { createReview } = require(${JSON.stringify(storePath)})
     const [root, gate] = process.argv.slice(1)
-    while (!fs.existsSync(gate)) {}
+    // Bounded: a worker must never outlive its parent spinning on a gate that
+    // will not arrive.
+    const giveUpAt = Date.now() + 30000
+    while (!fs.existsSync(gate)) {
+      if (Date.now() > giveUpAt) throw new Error('barrier never opened')
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2)
+    }
     createReview(root, {
       reason: 'manual', rendered: 'first-use', problem: 'p', evidence: 'e', solution: 's', context: {}
     })
@@ -207,40 +222,21 @@ test('concurrent first use never truncates the store or duplicates id 1', () => 
 // A crash between creating the lock and writing its owner file left a lock with
 // no recorded holder. Staleness was read from the owner file, so an ownerless
 // lock was never stale and every later writer timed out forever.
-test('a lock with no owner record is eventually broken, not deadlocked', () => {
-  const root = makeProjectRoot('bubo-ownerless-lock-')
+// An abandoned lock is never reclaimed automatically, so the store surfaces the
+// actionable error rather than silently proceeding or hanging.
+test('a store held by an abandoned lock reports how to recover', () => {
+  const root = makeProjectRoot('bubo-store-stale-lock-')
   ensureProjectState(root)
   const lockPath = path.join(root, '.bubo', '.lock')
   fs.mkdirSync(lockPath)
-  // Backdate past the stale threshold so the test does not sit through it.
-  const longAgo = new Date(Date.now() - 60000)
-  fs.utimesSync(lockPath, longAgo, longAgo)
+  fs.writeFileSync(path.join(lockPath, 'owner'), `tok 4194304 ${Date.now()}\n`)
 
-  const created = createReview(root, makePayload('after ownerless lock'))
-  assert.equal(created.id, 1)
-  assert.equal(readReviews(root).length, 1)
-})
-
-// Breaking a stale lock used a blind recursive delete, so a contender could
-// remove a lock another contender had just legitimately acquired, and the
-// original holder's release could delete its successor's lock.
-test('releasing a lock does not delete a successor lock', () => {
-  const root = makeProjectRoot('bubo-lock-ownership-')
-  ensureProjectState(root)
-  const lockPath = path.join(root, '.bubo', '.lock')
-
-  let observed = null
-  withLock(root, () => {
-    // Simulate a stale-breaker taking over mid-hold: the lock we are about to
-    // release is no longer ours.
-    fs.rmSync(lockPath, { recursive: true, force: true })
-    fs.mkdirSync(lockPath)
-    fs.writeFileSync(path.join(lockPath, 'owner'), 'someone-else 0\n')
-    observed = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8')
-  })
-
-  assert.ok(fs.existsSync(lockPath), 'successor lock must survive our release')
-  assert.equal(fs.readFileSync(path.join(lockPath, 'owner'), 'utf8'), observed)
+  assert.throws(
+    () => withLock(root, () => 'nope', { timeoutMs: 200 }),
+    /bubo unlock/,
+    'the error must tell the operator how to clear it'
+  )
+  assert.ok(fs.existsSync(lockPath), 'and must not silently remove it')
   fs.rmSync(lockPath, { recursive: true, force: true })
 })
 
@@ -250,4 +246,39 @@ test('id allocation refuses to run past the safe integer ceiling', () => {
   appendReview(root, { id: Number.MAX_SAFE_INTEGER, timestamp: '2026-07-20T00:00:00Z', status: 'new', rendered: 'ceiling' })
 
   assert.throws(() => createReview(root, makePayload('overflow')), /safe integer|ceiling|exhausted/i)
+})
+
+// --- Second review round: lock liveness, crash safety ---
+
+// Time alone is a bad staleness signal: a holder doing legitimate slow work is
+// declared dead at the threshold and has the store taken from under it. Liveness
+// of the owning process is the signal that actually means "abandoned".
+test('a failed rewrite leaves the original store intact', () => {
+  const root = makeProjectRoot('bubo-rewrite-atomic-')
+  createReview(root, makePayload('one'))
+  createReview(root, makePayload('two'))
+  const before = fs.readFileSync(path.join(root, '.bubo', 'reviews.jsonl'), 'utf8')
+
+  // Block the temp path with a directory so the staged write cannot succeed.
+  const tmpGuard = path.join(root, '.bubo', 'reviews.jsonl.tmp-guard')
+  fs.mkdirSync(tmpGuard)
+
+  assert.throws(() => rewriteReviews(root, [{ id: 1, rendered: 'clobbered' }], {
+    tmpPath: tmpGuard
+  }))
+
+  const after = fs.readFileSync(path.join(root, '.bubo', 'reviews.jsonl'), 'utf8')
+  assert.equal(after, before, 'the canonical file must be untouched by a failed rewrite')
+})
+
+test('a successful rewrite leaves no temp residue', () => {
+  const root = makeProjectRoot('bubo-rewrite-residue-')
+  createReview(root, makePayload('one'))
+  const reviews = readReviews(root)
+  reviews[0].status = 'promoted'
+  rewriteReviews(root, reviews)
+
+  const leftovers = fs.readdirSync(path.join(root, '.bubo')).filter((n) => n.includes('tmp'))
+  assert.deepEqual(leftovers, [])
+  assert.equal(readReviews(root)[0].status, 'promoted')
 })

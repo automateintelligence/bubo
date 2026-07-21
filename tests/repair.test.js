@@ -162,3 +162,77 @@ test('repair waits on a held store lock instead of racing it', () => {
   const store = resolveStore(dir)
   assert.throws(() => repairStore(store, true, { lockTimeoutMs: 200 }), /Timed out waiting for the Bubo store lock/i)
 })
+
+// --- Second review round: repair safety and fidelity ---
+
+// pruneState mutated state.json while holding the REVIEW lock, but session and
+// cooldown writers take no lock at all, so a concurrent bubo start/stop could be
+// silently overwritten. Allocation ignores nextId entirely, so the safe fix is
+// to stop touching state.json at all.
+test('repair does not modify state.json', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'bubo-repair-state-'))
+  const bubo = path.join(dir, '.bubo')
+  fs.mkdirSync(bubo)
+  fs.writeFileSync(path.join(bubo, 'reviews.jsonl'), DUPLICATED)
+  const statePath = path.join(bubo, 'state.json')
+  const original = JSON.stringify({ nextId: 274, enabled: false, dedup: [] }, null, 2) + '\n'
+  fs.writeFileSync(statePath, original)
+
+  repairStore(resolveStore(dir), true)
+
+  assert.equal(fs.readFileSync(statePath, 'utf8'), original, 'state.json must be left alone')
+  const leftovers = fs.readdirSync(bubo).filter((n) => n.startsWith('state.json.'))
+  assert.deepEqual(leftovers, [], 'no state temp files may be created')
+})
+
+// A record whose id is not a usable positive integer can never be addressed by
+// `implement <id>`, so repair has to give it a real one.
+test('records with unusable ids are reassigned so they become reachable', () => {
+  const odd = [
+    JSON.stringify({ id: 1, timestamp: '2026-07-01T00:00:00.000Z', rendered: 'fine' }),
+    JSON.stringify({ id: 'seven', timestamp: '2026-07-02T00:00:00.000Z', rendered: 'string id' }),
+    JSON.stringify({ timestamp: '2026-07-03T00:00:00.000Z', rendered: 'missing id' }),
+    JSON.stringify({ id: 0, timestamp: '2026-07-04T00:00:00.000Z', rendered: 'zero id' }),
+    JSON.stringify({ id: -3, timestamp: '2026-07-05T00:00:00.000Z', rendered: 'negative id' })
+  ].join('\n') + '\n'
+
+  const { content } = applyRepair(odd)
+  const reviews = content.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+
+  assert.equal(reviews.length, 5)
+  reviews.forEach((review) => {
+    assert.ok(Number.isSafeInteger(review.id) && review.id > 0, `unusable id: ${review.id}`)
+  })
+  assert.equal(new Set(reviews.map((r) => r.id)).size, 5, 'and all distinct')
+})
+
+// Repair should be a minimal edit. Reserializing every record rewrites bytes it
+// was never asked to touch, and dropping blank lines mutates the file further.
+test('records that keep their id keep their exact original bytes', () => {
+  const spaced = '{"id":1,  "rendered":"odd  spacing",   "timestamp":"2026-07-01T00:00:00.000Z"}'
+  const raw = [spaced, record(2, '2026-07-02T00:00:00.000Z', 'two')].join('\n') + '\n'
+
+  const { content, plan } = applyRepair(raw)
+  assert.equal(plan.reassignments.length, 0)
+  assert.equal(content, raw, 'an unaffected store must be byte-identical')
+})
+
+test('blank lines are preserved rather than silently dropped', () => {
+  const raw = [
+    record(1, '2026-07-01T00:00:00.000Z', 'one'),
+    '',
+    record(1, '2026-07-02T00:00:00.000Z', 'dup')
+  ].join('\n') + '\n'
+
+  const { content } = applyRepair(raw)
+  assert.equal(content.split('\n').length, raw.split('\n').length, 'line count preserved')
+})
+
+// Math.max(...ids) blows the argument limit on a large store.
+test('a large store does not exceed the argument limit', () => {
+  const many = Array.from({ length: 150000 }, (_, i) =>
+    record(i + 1, `2026-07-01T00:00:00.${String(i % 1000).padStart(3, '0')}Z`, `n${i}`)
+  ).join('\n') + '\n'
+
+  assert.doesNotThrow(() => planRepair(many))
+})

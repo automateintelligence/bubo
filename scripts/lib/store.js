@@ -1,6 +1,8 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
+const lock = require('./lock')
+
 const DEFAULT_CONFIG = {
   cooldowns: {
     turnMs: 10000,
@@ -19,14 +21,6 @@ const DEFAULT_STATE = {
   dedup: [],
   enabled: true
 }
-
-// A held lock older than this is treated as abandoned (crashed process, killed
-// session) and broken, so one dead writer cannot wedge the store forever.
-const LOCK_STALE_MS = 10000
-// Must exceed LOCK_STALE_MS. A contender that gave up first would never reach
-// the point of declaring a lock stale, so abandoned locks could never be broken
-// and the store would wedge permanently.
-const LOCK_TIMEOUT_MS = 15000
 
 function buboDir(root) {
   return path.join(root, '.bubo')
@@ -72,110 +66,10 @@ function readJsonFile(filePath, fallback) {
   }
 }
 
-let lockCounter = 0
-
-// Every hold gets a token nobody else can guess or reproduce, so a holder can
-// prove the lock it is about to release is still the one it took.
-function mintToken() {
-  lockCounter += 1
-  return `${process.pid}-${lockCounter}-${Math.random().toString(36).slice(2)}`
-}
-
-// mkdir is atomic on POSIX and Windows alike: exactly one caller can create a
-// given directory, which makes it a lock without a dependency.
-//
-// Two properties this has to get right, both learned the hard way:
-//
-//   Staleness is read from the lock directory's own mtime, not from the owner
-//   file. A crash between mkdir and writing the owner leaves an ownerless lock;
-//   judging staleness by file contents made that lock immortal and every later
-//   writer timed out forever.
-//
-//   Breaking a stale lock claims it by rename rather than deleting it in place.
-//   rename to a unique name is atomic, so when several contenders decide the
-//   same lock is stale exactly one wins and the losers get ENOENT. A blind
-//   recursive delete let a contender erase a lock somebody else had just
-//   legitimately acquired.
-function acquireLock(dir, now = Date.now) {
-  const lockPath = path.join(dir, '.lock')
-  const deadline = now() + LOCK_TIMEOUT_MS
-  const token = mintToken()
-
-  for (;;) {
-    try {
-      fs.mkdirSync(lockPath)
-      fs.writeFileSync(path.join(lockPath, 'owner'), `${token}\n`)
-      return { lockPath, token }
-    } catch (error) {
-      if (error.code !== 'EEXIST') throw error
-
-      let heldSince = 0
-      try {
-        heldSince = fs.statSync(lockPath).mtimeMs
-      } catch {
-        // Released between our mkdir and our stat; just retry.
-        continue
-      }
-
-      if (now() - heldSince > LOCK_STALE_MS) {
-        try {
-          // Atomically claim the stale lock. Only one contender's rename lands.
-          fs.renameSync(lockPath, `${lockPath}.stale-${mintToken()}`)
-        } catch {
-          // Someone else claimed or released it first.
-        }
-        continue
-      }
-
-      if (now() > deadline) {
-        throw new Error(`Timed out waiting for the Bubo store lock at ${lockPath}`)
-      }
-
-      // Synchronous sleep: callers of createReview are synchronous.
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5)
-    }
-  }
-}
-
-// Only remove the lock if it is still ours. If a stale-breaker took it over
-// while we were working, the directory now belongs to our successor and
-// deleting it would hand the store to two writers at once.
-function releaseLock({ lockPath, token }) {
-  let owner = null
-  try {
-    owner = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').trim()
-  } catch {
-    return
-  }
-
-  if (owner === token) {
-    fs.rmSync(lockPath, { recursive: true, force: true })
-  }
-}
-
-// Sweep lock directories abandoned by stale-breaking. Cheap, and keeps .bubo
-// from accumulating .lock.stale-* entries over a long-lived project.
-function sweepStaleLocks(dir) {
-  let entries = []
-  try {
-    entries = fs.readdirSync(dir)
-  } catch {
-    return
-  }
-  entries
-    .filter((name) => name.startsWith('.lock.stale-'))
-    .forEach((name) => fs.rmSync(path.join(dir, name), { recursive: true, force: true }))
-}
-
-function withLock(root, fn) {
-  const dir = buboDir(root)
-  const held = acquireLock(dir)
-  try {
-    return fn()
-  } finally {
-    releaseLock(held)
-    sweepStaleLocks(dir)
-  }
+// The lock protocol lives in ./lock.js so the runtime and the standalone repair
+// tool cannot drift apart; see that file for why reclamation needs a breaker.
+function withLock(root, fn, options = {}) {
+  return lock.withLock(buboDir(root), fn, options)
 }
 
 function readConfig(root) {
@@ -236,11 +130,35 @@ function readReviews(root) {
     .map((line) => JSON.parse(line))
 }
 
-function rewriteReviews(root, reviews) {
+// Staged write plus rename. A plain writeFileSync truncates the canonical file
+// first, so a kill or a full disk mid-write leaves partial JSONL: history is
+// lost, and with it the high-water mark, so ids start being reissued. rename is
+// atomic within a filesystem, so readers see either the old file or the new one.
+function rewriteReviews(root, reviews, options = {}) {
   ensureProjectState(root)
   const file = path.join(buboDir(root), 'reviews.jsonl')
   const payload = reviews.map((review) => JSON.stringify(review)).join('\n')
-  fs.writeFileSync(file, payload ? `${payload}\n` : '')
+  const tmp = options.tmpPath || `${file}.${process.pid}.${lock.mintToken()}.tmp`
+
+  const handle = fs.openSync(tmp, 'wx')
+  try {
+    fs.writeFileSync(handle, payload ? `${payload}\n` : '')
+    // rename gives atomic visibility, not durability; flush before publishing.
+    fs.fsyncSync(handle)
+  } catch (error) {
+    // A write or flush failure must not strand the staged file.
+    fs.closeSync(handle)
+    fs.rmSync(tmp, { force: true })
+    throw error
+  }
+  fs.closeSync(handle)
+
+  try {
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    fs.rmSync(tmp, { force: true })
+    throw error
+  }
 }
 
 // The highest id the store has ever handed out. Scanned from reviews.jsonl
