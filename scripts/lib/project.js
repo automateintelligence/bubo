@@ -28,7 +28,10 @@ function isGitRoot(dir) {
 
   if (stat.isFile()) {
     try {
-      return fs.readFileSync(gitPath, 'utf8').trimStart().startsWith('gitdir:')
+      // No trimming: git requires "gitdir:" at offset zero and fails with
+      // "invalid gitfile format" otherwise. Accepting leading whitespace would
+      // adopt a root git itself refuses, which is the bug this guards against.
+      return fs.readFileSync(gitPath, 'utf8').startsWith('gitdir:')
     } catch {
       return false
     }

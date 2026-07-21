@@ -53,6 +53,20 @@ test('an empty .git directory is not a project root', () => {
   assert.notEqual(resolveProjectRoot(inner), outer, 'must not adopt the fake ancestor')
 })
 
+// git parses a gitfile strictly: the content must begin with "gitdir:" at
+// offset zero. Leading whitespace makes git fail with "invalid gitfile format",
+// so tolerating it here would re-admit the very wrong-root bug this guards
+// against — Bubo would adopt a root git itself refuses.
+test('a gitdir pointer with leading whitespace is not a project root', () => {
+  const outer = tempDir('bubo-proj-ws-')
+  fs.writeFileSync(path.join(outer, '.git'), '  gitdir: /somewhere/.git/worktrees/feature\n')
+  const inner = path.join(outer, 'workdir')
+  fs.mkdirSync(inner)
+
+  assert.equal(isGitRoot(outer), false)
+  assert.notEqual(resolveProjectRoot(inner), outer)
+})
+
 test('a .git file that is not a gitdir pointer is not a project root', () => {
   const outer = tempDir('bubo-proj-garbage-')
   fs.writeFileSync(path.join(outer, '.git'), 'notes to self\n')
