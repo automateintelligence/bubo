@@ -96,35 +96,85 @@ function mintToken() {
 //   same lock is stale exactly one wins and the losers get ENOENT. A blind
 //   recursive delete let a contender erase a lock somebody else had just
 //   legitimately acquired.
-function acquireLock(dir, now = Date.now) {
+// Signal 0 performs the permission and existence checks without delivering
+// anything. EPERM means the process exists but belongs to another user, which
+// still counts as alive.
+function isProcessAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
+}
+
+function readLockOwner(lockPath) {
+  try {
+    const [token, pid] = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').trim().split(/\s+/)
+    return { token, pid: Number(pid) }
+  } catch {
+    return null
+  }
+}
+
+// Elapsed time is the wrong test for abandonment: a holder doing legitimately
+// slow work gets evicted at the threshold and loses the store mid-write. Whether
+// the owning process still exists is the question that actually matters, and it
+// also narrows the window where a contender can quarantine a freshly taken lock,
+// since a new holder is alive by construction.
+//
+// The age fallback covers only the ownerless case — a crash between creating the
+// directory and writing the owner file, where there is no pid to interrogate.
+function lockIsAbandoned(lockPath, now, staleMs) {
+  const owner = readLockOwner(lockPath)
+  if (owner && Number.isInteger(owner.pid) && owner.pid > 0) {
+    return !isProcessAlive(owner.pid)
+  }
+
+  try {
+    return now - fs.statSync(lockPath).mtimeMs > staleMs
+  } catch {
+    return false
+  }
+}
+
+// Losing the race to break an abandoned lock is expected and simply means
+// somebody else got there. A permission failure is not — it will never succeed,
+// so it must not be retried in a tight loop.
+const EXPECTED_BREAK_FAILURES = new Set(['ENOENT', 'ENOTEMPTY', 'EEXIST', 'ENOTDIR'])
+
+function acquireLock(dir, options = {}) {
+  const now = options.now || Date.now
+  const timeoutMs = options.timeoutMs ?? LOCK_TIMEOUT_MS
+  const staleMs = options.staleMs ?? LOCK_STALE_MS
   const lockPath = path.join(dir, '.lock')
-  const deadline = now() + LOCK_TIMEOUT_MS
+  const deadline = now() + timeoutMs
   const token = mintToken()
 
   for (;;) {
     try {
       fs.mkdirSync(lockPath)
-      fs.writeFileSync(path.join(lockPath, 'owner'), `${token}\n`)
+      fs.writeFileSync(path.join(lockPath, 'owner'), `${token} ${process.pid}\n`)
       return { lockPath, token }
     } catch (error) {
       if (error.code !== 'EEXIST') throw error
 
-      let heldSince = 0
-      try {
-        heldSince = fs.statSync(lockPath).mtimeMs
-      } catch {
-        // Released between our mkdir and our stat; just retry.
-        continue
-      }
-
-      if (now() - heldSince > LOCK_STALE_MS) {
+      if (lockIsAbandoned(lockPath, now(), staleMs)) {
         try {
-          // Atomically claim the stale lock. Only one contender's rename lands.
+          // Claim it by rename: atomic, so exactly one contender wins and the
+          // rest fail rather than all deleting the same directory.
           fs.renameSync(lockPath, `${lockPath}.stale-${mintToken()}`)
-        } catch {
-          // Someone else claimed or released it first.
+          continue
+        } catch (breakError) {
+          if (!EXPECTED_BREAK_FAILURES.has(breakError.code)) {
+            throw new Error(
+              `Cannot reclaim an abandoned Bubo store lock at ${lockPath}: ${breakError.code}`
+            )
+          }
+          // Lost the race. Fall through to the deadline check and the sleep
+          // below rather than looping straight back round.
         }
-        continue
       }
 
       if (now() > deadline) {
@@ -141,14 +191,8 @@ function acquireLock(dir, now = Date.now) {
 // while we were working, the directory now belongs to our successor and
 // deleting it would hand the store to two writers at once.
 function releaseLock({ lockPath, token }) {
-  let owner = null
-  try {
-    owner = fs.readFileSync(path.join(lockPath, 'owner'), 'utf8').trim()
-  } catch {
-    return
-  }
-
-  if (owner === token) {
+  const owner = readLockOwner(lockPath)
+  if (owner && owner.token === token) {
     fs.rmSync(lockPath, { recursive: true, force: true })
   }
 }
@@ -167,9 +211,9 @@ function sweepStaleLocks(dir) {
     .forEach((name) => fs.rmSync(path.join(dir, name), { recursive: true, force: true }))
 }
 
-function withLock(root, fn) {
+function withLock(root, fn, options = {}) {
   const dir = buboDir(root)
-  const held = acquireLock(dir)
+  const held = acquireLock(dir, options)
   try {
     return fn()
   } finally {
@@ -236,11 +280,23 @@ function readReviews(root) {
     .map((line) => JSON.parse(line))
 }
 
-function rewriteReviews(root, reviews) {
+// Staged write plus rename. A plain writeFileSync truncates the canonical file
+// first, so a kill or a full disk mid-write leaves partial JSONL: history is
+// lost, and with it the high-water mark, so ids start being reissued. rename is
+// atomic within a filesystem, so readers see either the old file or the new one.
+function rewriteReviews(root, reviews, options = {}) {
   ensureProjectState(root)
   const file = path.join(buboDir(root), 'reviews.jsonl')
   const payload = reviews.map((review) => JSON.stringify(review)).join('\n')
-  fs.writeFileSync(file, payload ? `${payload}\n` : '')
+  const tmp = options.tmpPath || `${file}.${process.pid}.${mintToken()}.tmp`
+
+  fs.writeFileSync(tmp, payload ? `${payload}\n` : '', { flag: 'wx' })
+  try {
+    fs.renameSync(tmp, file)
+  } catch (error) {
+    fs.rmSync(tmp, { force: true })
+    throw error
+  }
 }
 
 // The highest id the store has ever handed out. Scanned from reviews.jsonl

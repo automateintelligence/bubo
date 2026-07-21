@@ -27,11 +27,30 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
+// An id is only usable if `implement <id>` can address it: a positive safe
+// integer. Anything else — missing, a string, null, zero, negative, beyond the
+// safe range — leaves the record permanently unreachable and must be reassigned.
+function hasUsableId(review) {
+  return Number.isSafeInteger(review.id) && review.id > 0
+}
+
+// Every line is retained with its original index, including blank ones, so the
+// file can be rebuilt byte-for-byte apart from the ids that actually change.
 function parseStore(raw) {
   const records = []
   const damaged = []
+  const blanks = []
 
-  raw.split('\n').filter(Boolean).forEach((line, index) => {
+  const lines = raw.split('\n')
+  // A trailing newline yields a final empty element that is not a real line.
+  if (lines.length && lines[lines.length - 1] === '') lines.pop()
+
+  lines.forEach((line, index) => {
+    if (!line.trim()) {
+      blanks.push({ line, index })
+      return
+    }
+
     let review
     try {
       review = JSON.parse(line)
@@ -49,7 +68,7 @@ function parseStore(raw) {
     records.push({ review, line, index })
   })
 
-  return { records, damaged }
+  return { records, damaged, blanks }
 }
 
 // Timestamp first so reassignment follows real chronology; file order breaks
@@ -63,21 +82,36 @@ function compareEntries(a, b) {
 }
 
 function planRepair(raw) {
-  const { records, damaged } = parseStore(raw)
+  const { records, damaged, blanks } = parseStore(raw)
+
+  const usable = records.filter((entry) => hasUsableId(entry.review))
+  const unusable = records.filter((entry) => !hasUsableId(entry.review))
 
   const groups = new Map()
-  records.forEach((entry) => {
+  usable.forEach((entry) => {
     const id = entry.review.id
     if (!groups.has(id)) groups.set(id, [])
     groups.get(id).push(entry)
   })
 
-  const numericIds = records
-    .map((entry) => entry.review.id)
-    .filter((id) => Number.isSafeInteger(id))
-  let nextId = numericIds.length ? Math.max(...numericIds) + 1 : 1
+  // reduce, not Math.max(...ids): spreading a large store exceeds the argument
+  // limit and throws RangeError (reproducible at 150k records).
+  let nextId = records.reduce(
+    (max, entry) => (hasUsableId(entry.review) && entry.review.id > max ? entry.review.id : max),
+    0
+  ) + 1
 
   const reassignments = []
+
+  // Records whose id could never be addressed get a real one regardless of
+  // whether they collide with anything.
+  unusable.sort(compareEntries).forEach((entry) => {
+    if (nextId >= Number.MAX_SAFE_INTEGER) {
+      throw new Error('Cannot repair: reassignment would exceed the safe integer ceiling')
+    }
+    reassignments.push({ from: entry.review.id, to: nextId, entry })
+    nextId += 1
+  })
 
   Array.from(groups.entries())
     .filter(([, entries]) => entries.length > 1)
@@ -101,57 +135,38 @@ function planRepair(raw) {
         })
     })
 
-  return { records, damaged, reassignments, nextId, duplicateIds:
+  return { records, damaged, blanks, reassignments, nextId, duplicateIds:
     Array.from(groups.values()).filter((entries) => entries.length > 1).length }
 }
 
+// Repair is a minimal edit: only the lines whose id actually changes are
+// reserialized. Everything else — untouched records, damaged lines, blank
+// lines — is written back exactly as it was read, so a store comes out
+// byte-identical apart from the ids that had to move.
 function applyRepair(raw) {
   const plan = planRepair(raw)
   const newIdByIndex = new Map(plan.reassignments.map((r) => [r.entry.index, r.to]))
 
-  // Rebuild in original file order, so the append-only history stays readable.
-  const lines = []
   const all = [
     ...plan.records.map((entry) => ({ index: entry.index, entry, kind: 'record' })),
-    ...plan.damaged.map((entry) => ({ index: entry.index, entry, kind: 'damaged' }))
+    ...plan.damaged.map((entry) => ({ index: entry.index, entry, kind: 'verbatim' })),
+    ...plan.blanks.map((entry) => ({ index: entry.index, entry, kind: 'verbatim' }))
   ].sort((a, b) => a.index - b.index)
 
-  all.forEach((item) => {
-    if (item.kind === 'damaged') {
-      lines.push(item.entry.line)
-      return
-    }
-    const review = item.entry.review
+  const lines = all.map((item) => {
+    if (item.kind === 'verbatim') return item.entry.line
     const replacement = newIdByIndex.get(item.entry.index)
-    lines.push(JSON.stringify(replacement ? { ...review, id: replacement } : review))
+    if (!replacement) return item.entry.line
+    return JSON.stringify({ ...item.entry.review, id: replacement })
   })
 
   return { plan, content: lines.length ? `${lines.join('\n')}\n` : '' }
 }
 
-// state.json's nextId is vestigial once ids come from reviews.jsonl; leaving a
-// stale counter behind only invites confusion about which file is authoritative.
-function pruneState(statePath, write) {
-  if (!fs.existsSync(statePath)) return null
-
-  let state
-  try {
-    state = JSON.parse(fs.readFileSync(statePath, 'utf8'))
-  } catch {
-    return { corrupt: true }
-  }
-
-  if (!('nextId' in state)) return null
-  delete state.nextId
-
-  if (write) {
-    const tmp = `${statePath}.${process.pid}.tmp`
-    fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n')
-    fs.renameSync(tmp, statePath)
-  }
-
-  return { prunedNextId: true }
-}
+// state.json is deliberately NOT touched. Its nextId is vestigial — allocation
+// reads reviews.jsonl — and rewriting it here would race session and cooldown
+// writers, which take no lock at all, silently discarding an explicit bubo
+// stop or a cooldown update.
 
 function resolveStore(target) {
   const asBubo = path.basename(target) === '.bubo' ? target : path.join(target, '.bubo')
@@ -288,7 +303,6 @@ function repairStore(store, write, options = {}) {
     fs.renameSync(tmp, store.reviews)
 
     summary.backup = backup
-    summary.state = pruneState(path.join(store.dir, 'state.json'), true)
     return summary
   } finally {
     releaseStoreLock(held)

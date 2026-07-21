@@ -13,6 +13,7 @@ const {
   createReview,
   readReviews,
   readState,
+  rewriteReviews,
   withLock
 } = require('../scripts/lib/store')
 
@@ -250,4 +251,100 @@ test('id allocation refuses to run past the safe integer ceiling', () => {
   appendReview(root, { id: Number.MAX_SAFE_INTEGER, timestamp: '2026-07-20T00:00:00Z', status: 'new', rendered: 'ceiling' })
 
   assert.throws(() => createReview(root, makePayload('overflow')), /safe integer|ceiling|exhausted/i)
+})
+
+// --- Second review round: lock liveness, crash safety ---
+
+// Time alone is a bad staleness signal: a holder doing legitimate slow work is
+// declared dead at the threshold and has the store taken from under it. Liveness
+// of the owning process is the signal that actually means "abandoned".
+test('a lock held by a live process is never broken, however old', () => {
+  const root = makeProjectRoot('bubo-lock-live-')
+  ensureProjectState(root)
+  const lockPath = path.join(root, '.bubo', '.lock')
+  fs.mkdirSync(lockPath)
+  // Owned by THIS process, which is definitionally alive.
+  fs.writeFileSync(path.join(lockPath, 'owner'), `sometoken ${process.pid}\n`)
+  const longAgo = new Date(Date.now() - 600000)
+  fs.utimesSync(lockPath, longAgo, longAgo)
+
+  assert.throws(
+    () => withLock(root, () => 'should not run', { timeoutMs: 300 }),
+    /Timed out waiting for the Bubo store lock/i,
+    'a live holder must not be evicted'
+  )
+  assert.ok(fs.existsSync(lockPath), 'the live holder still owns the lock')
+  fs.rmSync(lockPath, { recursive: true, force: true })
+})
+
+test('a lock whose owning process is gone is broken promptly', () => {
+  const root = makeProjectRoot('bubo-lock-dead-')
+  ensureProjectState(root)
+  const lockPath = path.join(root, '.bubo', '.lock')
+  fs.mkdirSync(lockPath)
+  // PID 2^22 is above the default pid_max, so it cannot be running.
+  fs.writeFileSync(path.join(lockPath, 'owner'), `sometoken 4194304\n`)
+
+  const created = createReview(root, makePayload('after dead holder'))
+  assert.equal(created.id, 1)
+})
+
+// A stale-break that keeps failing (EACCES on a read-only parent, say) used to
+// `continue` straight back to the top, skipping both the deadline check and the
+// sleep, and spin a core until the process was killed.
+test('a stale break that cannot succeed still honours the deadline', () => {
+  const root = makeProjectRoot('bubo-lock-spin-')
+  ensureProjectState(root)
+  const bubo = path.join(root, '.bubo')
+  const lockPath = path.join(bubo, '.lock')
+  fs.mkdirSync(lockPath)
+  fs.writeFileSync(path.join(lockPath, 'owner'), `sometoken 4194304\n`)
+  // Read-only parent: the rename that would claim the stale lock cannot land.
+  fs.chmodSync(bubo, 0o555)
+
+  const started = Date.now()
+  try {
+    assert.throws(
+      () => withLock(root, () => 'nope', { timeoutMs: 400 }),
+      /Timed out waiting for the Bubo store lock|EACCES|EPERM/i
+    )
+    const elapsed = Date.now() - started
+    assert.ok(elapsed < 5000, `gave up in ${elapsed}ms rather than spinning`)
+  } finally {
+    fs.chmodSync(bubo, 0o755)
+    fs.rmSync(lockPath, { recursive: true, force: true })
+  }
+})
+
+// rewriteReviews truncates the canonical file before writing it. A kill or a
+// full disk mid-write leaves partial JSONL: history is lost, and with it the
+// high-water mark, so ids start being reissued.
+test('a failed rewrite leaves the original store intact', () => {
+  const root = makeProjectRoot('bubo-rewrite-atomic-')
+  createReview(root, makePayload('one'))
+  createReview(root, makePayload('two'))
+  const before = fs.readFileSync(path.join(root, '.bubo', 'reviews.jsonl'), 'utf8')
+
+  // Block the temp path with a directory so the staged write cannot succeed.
+  const tmpGuard = path.join(root, '.bubo', 'reviews.jsonl.tmp-guard')
+  fs.mkdirSync(tmpGuard)
+
+  assert.throws(() => rewriteReviews(root, [{ id: 1, rendered: 'clobbered' }], {
+    tmpPath: tmpGuard
+  }))
+
+  const after = fs.readFileSync(path.join(root, '.bubo', 'reviews.jsonl'), 'utf8')
+  assert.equal(after, before, 'the canonical file must be untouched by a failed rewrite')
+})
+
+test('a successful rewrite leaves no temp residue', () => {
+  const root = makeProjectRoot('bubo-rewrite-residue-')
+  createReview(root, makePayload('one'))
+  const reviews = readReviews(root)
+  reviews[0].status = 'promoted'
+  rewriteReviews(root, reviews)
+
+  const leftovers = fs.readdirSync(path.join(root, '.bubo')).filter((n) => n.includes('tmp'))
+  assert.deepEqual(leftovers, [])
+  assert.equal(readReviews(root)[0].status, 'promoted')
 })
