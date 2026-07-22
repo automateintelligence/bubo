@@ -282,3 +282,99 @@ test('a successful rewrite leaves no temp residue', () => {
   assert.deepEqual(leftovers, [])
   assert.equal(readReviews(root)[0].status, 'promoted')
 })
+
+// --- Context bloat: recentReviews recursion ---
+
+const { CONTEXT_TOTAL_CAP, clampContext, summarizeRecentReview } = require('../scripts/lib/store')
+
+test('summarizeRecentReview keeps dedup and display fields, drops context', () => {
+  const full = {
+    id: 5, timestamp: 't', reason: 'test-fail', problem: 'p', rendered: 'r',
+    evidence: 'e', solution: 's', status: 'new',
+    context: { recentReviews: [{ big: 'x'.repeat(10000) }] }
+  }
+  const summary = summarizeRecentReview(full)
+  assert.deepEqual(Object.keys(summary).sort(), ['id', 'problem', 'reason', 'rendered', 'timestamp'])
+  assert.equal('context' in summary, false)
+})
+
+test('clampContext strips context from recentReviews, killing the recursion', () => {
+  const context = {
+    reason: 'test-fail',
+    recentReviews: [
+      { id: 1, timestamp: 't', reason: 'r', problem: 'p', rendered: 'x',
+        context: { recentReviews: [{ context: { huge: 'y'.repeat(1_000_000) } }] } }
+    ]
+  }
+  const clamped = clampContext(context)
+  assert.equal('context' in clamped.recentReviews[0], false, 'nested context removed')
+  assert.ok(JSON.stringify(clamped).length < 1000, 'no megabyte payload survives')
+  // Dedup fields preserved.
+  assert.equal(clamped.recentReviews[0].problem, 'p')
+})
+
+test('clampContext caps oversized string fields', () => {
+  const clamped = clampContext({ diffExcerpt: 'z'.repeat(50000) })
+  assert.ok(clamped.diffExcerpt.length < 9000)
+  assert.match(clamped.diffExcerpt, /truncated|\+\d+ chars/)
+})
+
+test('clampContext leaves a small context untouched', () => {
+  const small = { reason: 'turn', cwd: '/x', diffExcerpt: 'short', recentReviews: [] }
+  assert.deepEqual(clampContext(small), small)
+})
+
+// The total budget must hold under adversarial shapes the per-field cap alone
+// misses: many capped fields, and a primitive-string context.
+test('clampContext enforces a total byte budget across many fields', () => {
+  const many = {}
+  for (let i = 0; i < 1000; i += 1) many[`f${i}`] = 'x'.repeat(8000)
+  const clamped = clampContext(many)
+  assert.ok(Buffer.byteLength(JSON.stringify(clamped)) <= CONTEXT_TOTAL_CAP,
+    `still ${Buffer.byteLength(JSON.stringify(clamped))} bytes`)
+})
+
+test('clampContext bounds a non-object context', () => {
+  const clamped = clampContext('Q'.repeat(2_000_000))
+  assert.ok(Buffer.byteLength(JSON.stringify(clamped)) <= CONTEXT_TOTAL_CAP)
+  assert.equal(clamped.truncated, true)
+})
+
+test('clampContext bounds a single pathological field', () => {
+  const clamped = clampContext({ blob: { nested: 'y'.repeat(5_000_000) } })
+  assert.ok(Buffer.byteLength(JSON.stringify(clamped)) <= CONTEXT_TOTAL_CAP)
+})
+
+// Top-level free-text fields are bounded too; the store must not trust a caller.
+test('createReview caps oversized record text fields', () => {
+  const root = makeProjectRoot('bubo-record-text-')
+  const created = createReview(root, {
+    reason: 'manual',
+    problem: 'P'.repeat(2_000_000),
+    evidence: 'e', solution: 's', rendered: 'r', context: {}
+  })
+  const stored = readReviews(root).find((r) => r.id === created.id)
+  assert.ok(stored.problem.length < 9000, `problem was ${stored.problem.length}`)
+  assert.ok(JSON.stringify(stored).length < 20000)
+})
+
+test('a review created with a fat context is stored bounded', () => {
+  const root = makeProjectRoot('bubo-context-clamp-')
+  // A context shaped like the real recursion: recentReviews carrying nested context.
+  const fatContext = {
+    reason: 'test-fail',
+    toolOutputExcerpt: 'ok',
+    recentReviews: [
+      { id: 1, problem: 'prior', rendered: 'r',
+        context: { toolOutputExcerpt: 'Q'.repeat(2_000_000) } }
+    ]
+  }
+  createReview(root, makePayload('note'))
+  const created = createReview(root, { ...makePayload('note2'), context: fatContext })
+
+  const raw = fs.readFileSync(path.join(root, '.bubo', 'reviews.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const stored = raw.find((r) => r.id === created.id)
+  assert.ok(JSON.stringify(stored).length < 20000, 'record must not carry the 2MB blob')
+  assert.equal('context' in stored.context.recentReviews[0], false)
+})

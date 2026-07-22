@@ -193,6 +193,91 @@ function nextReviewId(root) {
   return max + 1
 }
 
+const CONTEXT_FIELD_CAP = 8192
+const CONTEXT_TOTAL_CAP = 65536
+const RECORD_TEXT_CAP = 8192
+
+function utf8Bytes(value) {
+  return Buffer.byteLength(JSON.stringify(value) ?? 'null')
+}
+
+function capString(value, cap) {
+  return value.length > cap
+    ? `${value.slice(0, cap)}…[+${value.length - cap} chars]`
+    : value
+}
+
+// The few fields dedup (fingerprint reads problem/rendered) and display use.
+// Deliberately omits `context` — carrying it is what made recentReviews recurse.
+function summarizeRecentReview(review) {
+  if (!review || typeof review !== 'object') return review
+  return {
+    id: review.id,
+    timestamp: review.timestamp,
+    reason: review.reason,
+    problem: typeof review.problem === 'string' ? capString(review.problem, CONTEXT_FIELD_CAP) : review.problem,
+    rendered: typeof review.rendered === 'string' ? capString(review.rendered, CONTEXT_FIELD_CAP) : review.rendered
+  }
+}
+
+// Bound what a review stores as context, to a hard UTF-8 byte budget under all
+// inputs. The dangerous field was recentReviews: it carried whole prior reviews
+// INCLUDING their context, which carried their recentReviews, and so on — each
+// generation multiplying the store until a single record reached 124MB.
+//
+// Guarantee: the returned value serializes to at most CONTEXT_TOTAL_CAP bytes.
+// recentReviews is reduced to the fields dedup and display read; oversized
+// strings are capped; and if the whole thing is still over budget (many fields,
+// or a pathological single field), the largest fields are replaced by markers
+// until it fits. A non-object context is bounded too.
+function clampContext(context) {
+  if (context === undefined || context === null) return context
+
+  if (typeof context !== 'object' || Array.isArray(context)) {
+    // A primitive or array context is unusual; bound it rather than trust it.
+    return utf8Bytes(context) <= CONTEXT_TOTAL_CAP
+      ? context
+      : { truncated: true, bytes: utf8Bytes(context) }
+  }
+
+  const out = {}
+  for (const [key, value] of Object.entries(context)) {
+    if (key === 'recentReviews' && Array.isArray(value)) {
+      out[key] = value.map(summarizeRecentReview)
+    } else if (typeof value === 'string') {
+      out[key] = capString(value, CONTEXT_FIELD_CAP)
+    } else {
+      out[key] = value
+    }
+  }
+
+  // Per-field capping handles the common case. If the whole thing is still over
+  // budget — too many fields, or a large non-string field — collapse to a small
+  // allowlist rather than iterating (repeatedly re-serialising a multi-megabyte
+  // object to find the largest field is quadratic and was itself a hang). One
+  // measurement decides; the fallback is bounded by construction.
+  const originalBytes = utf8Bytes(out)
+  if (originalBytes <= CONTEXT_TOTAL_CAP) return out
+
+  const reduced = { truncated: true, originalBytes }
+  for (const key of ['reason', 'cwd', 'timestamp']) {
+    if (typeof out[key] === 'string') reduced[key] = capString(out[key], 256)
+    else if (out[key] !== undefined) reduced[key] = out[key]
+  }
+  return reduced
+}
+
+// Bound the record's own free-text fields as well. rendered is clamped upstream,
+// but createReview must not trust a caller to have done so.
+function clampRecordText(review) {
+  for (const field of ['problem', 'evidence', 'solution', 'rendered']) {
+    if (typeof review[field] === 'string') {
+      review[field] = capString(review[field], RECORD_TEXT_CAP)
+    }
+  }
+  return review
+}
+
 // Ids come from reviews.jsonl rather than a counter in state.json: state.json
 // is rewritten on nearly every turn and has been observed to rewind, which
 // silently reissues ids that older records already own. The lock makes the
@@ -201,13 +286,15 @@ function createReview(root, payload) {
   ensureProjectState(root)
 
   return withLock(root, () => {
-    const review = {
+    const review = clampRecordText({
       timestamp: new Date().toISOString(),
       status: payload.status || 'new',
       ...payload,
+      // Bound before storing, so an unbounded context cannot bloat the store.
+      context: clampContext(payload.context),
       // Assigned last: the store owns ids, never the caller.
       id: nextReviewId(root)
-    }
+    })
 
     appendReview(root, review)
     return review
@@ -217,6 +304,10 @@ function createReview(root, payload) {
 module.exports = {
   DEFAULT_CONFIG,
   DEFAULT_STATE,
+  CONTEXT_TOTAL_CAP,
+  clampContext,
+  clampRecordText,
+  summarizeRecentReview,
   appendReview,
   buboDir,
   createReview,

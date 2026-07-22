@@ -7,7 +7,7 @@ const { execSync } = require('node:child_process')
 const { renderReviewLine, normalizeReview } = require('./lib/render')
 const { generateReview } = require('./lib/generate')
 const { resolveProjectRoot } = require('./lib/project')
-const { buboDir, createReview, ensureProjectState, readConfig, readReviews, readState, writeState } = require('./lib/store')
+const { buboDir, createReview, ensureProjectState, readConfig, readReviews, readState, summarizeRecentReview, writeState } = require('./lib/store')
 const lock = require('./lib/lock')
 const { considerReview, promoteReview } = require('./lib/promote')
 const { shouldTriggerReview } = require('./lib/trigger')
@@ -171,7 +171,7 @@ async function runReview(options) {
     toolOutputExcerpt: getToolOutputExcerpt(options),
     changedFiles: getChangedFiles(projectRoot),
     diffExcerpt: getDiffExcerpt(projectRoot, options),
-    recentReviews: readReviews(projectRoot).slice(-config.dedupWindow)
+    recentReviews: readReviews(projectRoot).slice(-config.dedupWindow).map(summarizeRecentReview)
   }
 
   const generated = await generateReview(packet, config)

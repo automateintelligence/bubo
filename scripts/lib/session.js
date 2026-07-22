@@ -1,7 +1,7 @@
 const fs = require('node:fs')
 const path = require('node:path')
 
-const { createReview, ensureProjectState, readConfig, readReviews, readState, writeState } = require('./store')
+const { createReview, ensureProjectState, readConfig, readReviews, readState, summarizeRecentReview, writeState } = require('./store')
 const { generateReview } = require('./generate')
 const { normalizeReview, renderReviewLine } = require('./render')
 const { shouldTriggerReview } = require('./trigger')
@@ -42,7 +42,7 @@ function buildPacket(projectRoot, options, now) {
     toolOutputExcerpt: clamp(resolve(options['tool-output-text'], options.getToolOutput, ''), 5000),
     changedFiles: resolve(options.changedFiles, options.getChangedFiles, []),
     diffExcerpt: clamp(resolve(options['diff-text'], options.getDiff, ''), 5000),
-    recentReviews: readReviews(projectRoot).slice(-config.dedupWindow)
+    recentReviews: readReviews(projectRoot).slice(-config.dedupWindow).map(summarizeRecentReview)
   }
 }
 
