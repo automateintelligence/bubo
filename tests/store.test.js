@@ -285,7 +285,7 @@ test('a successful rewrite leaves no temp residue', () => {
 
 // --- Context bloat: recentReviews recursion ---
 
-const { clampContext, summarizeRecentReview } = require('../scripts/lib/store')
+const { CONTEXT_TOTAL_CAP, clampContext, summarizeRecentReview } = require('../scripts/lib/store')
 
 test('summarizeRecentReview keeps dedup and display fields, drops context', () => {
   const full = {
@@ -322,6 +322,40 @@ test('clampContext caps oversized string fields', () => {
 test('clampContext leaves a small context untouched', () => {
   const small = { reason: 'turn', cwd: '/x', diffExcerpt: 'short', recentReviews: [] }
   assert.deepEqual(clampContext(small), small)
+})
+
+// The total budget must hold under adversarial shapes the per-field cap alone
+// misses: many capped fields, and a primitive-string context.
+test('clampContext enforces a total byte budget across many fields', () => {
+  const many = {}
+  for (let i = 0; i < 1000; i += 1) many[`f${i}`] = 'x'.repeat(8000)
+  const clamped = clampContext(many)
+  assert.ok(Buffer.byteLength(JSON.stringify(clamped)) <= CONTEXT_TOTAL_CAP,
+    `still ${Buffer.byteLength(JSON.stringify(clamped))} bytes`)
+})
+
+test('clampContext bounds a non-object context', () => {
+  const clamped = clampContext('Q'.repeat(2_000_000))
+  assert.ok(Buffer.byteLength(JSON.stringify(clamped)) <= CONTEXT_TOTAL_CAP)
+  assert.equal(clamped.truncated, true)
+})
+
+test('clampContext bounds a single pathological field', () => {
+  const clamped = clampContext({ blob: { nested: 'y'.repeat(5_000_000) } })
+  assert.ok(Buffer.byteLength(JSON.stringify(clamped)) <= CONTEXT_TOTAL_CAP)
+})
+
+// Top-level free-text fields are bounded too; the store must not trust a caller.
+test('createReview caps oversized record text fields', () => {
+  const root = makeProjectRoot('bubo-record-text-')
+  const created = createReview(root, {
+    reason: 'manual',
+    problem: 'P'.repeat(2_000_000),
+    evidence: 'e', solution: 's', rendered: 'r', context: {}
+  })
+  const stored = readReviews(root).find((r) => r.id === created.id)
+  assert.ok(stored.problem.length < 9000, `problem was ${stored.problem.length}`)
+  assert.ok(JSON.stringify(stored).length < 20000)
 })
 
 test('a review created with a fat context is stored bounded', () => {
