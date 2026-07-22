@@ -282,3 +282,65 @@ test('a successful rewrite leaves no temp residue', () => {
   assert.deepEqual(leftovers, [])
   assert.equal(readReviews(root)[0].status, 'promoted')
 })
+
+// --- Context bloat: recentReviews recursion ---
+
+const { clampContext, summarizeRecentReview } = require('../scripts/lib/store')
+
+test('summarizeRecentReview keeps dedup and display fields, drops context', () => {
+  const full = {
+    id: 5, timestamp: 't', reason: 'test-fail', problem: 'p', rendered: 'r',
+    evidence: 'e', solution: 's', status: 'new',
+    context: { recentReviews: [{ big: 'x'.repeat(10000) }] }
+  }
+  const summary = summarizeRecentReview(full)
+  assert.deepEqual(Object.keys(summary).sort(), ['id', 'problem', 'reason', 'rendered', 'timestamp'])
+  assert.equal('context' in summary, false)
+})
+
+test('clampContext strips context from recentReviews, killing the recursion', () => {
+  const context = {
+    reason: 'test-fail',
+    recentReviews: [
+      { id: 1, timestamp: 't', reason: 'r', problem: 'p', rendered: 'x',
+        context: { recentReviews: [{ context: { huge: 'y'.repeat(1_000_000) } }] } }
+    ]
+  }
+  const clamped = clampContext(context)
+  assert.equal('context' in clamped.recentReviews[0], false, 'nested context removed')
+  assert.ok(JSON.stringify(clamped).length < 1000, 'no megabyte payload survives')
+  // Dedup fields preserved.
+  assert.equal(clamped.recentReviews[0].problem, 'p')
+})
+
+test('clampContext caps oversized string fields', () => {
+  const clamped = clampContext({ diffExcerpt: 'z'.repeat(50000) })
+  assert.ok(clamped.diffExcerpt.length < 9000)
+  assert.match(clamped.diffExcerpt, /truncated|\+\d+ chars/)
+})
+
+test('clampContext leaves a small context untouched', () => {
+  const small = { reason: 'turn', cwd: '/x', diffExcerpt: 'short', recentReviews: [] }
+  assert.deepEqual(clampContext(small), small)
+})
+
+test('a review created with a fat context is stored bounded', () => {
+  const root = makeProjectRoot('bubo-context-clamp-')
+  // A context shaped like the real recursion: recentReviews carrying nested context.
+  const fatContext = {
+    reason: 'test-fail',
+    toolOutputExcerpt: 'ok',
+    recentReviews: [
+      { id: 1, problem: 'prior', rendered: 'r',
+        context: { toolOutputExcerpt: 'Q'.repeat(2_000_000) } }
+    ]
+  }
+  createReview(root, makePayload('note'))
+  const created = createReview(root, { ...makePayload('note2'), context: fatContext })
+
+  const raw = fs.readFileSync(path.join(root, '.bubo', 'reviews.jsonl'), 'utf8')
+    .split('\n').filter(Boolean).map((l) => JSON.parse(l))
+  const stored = raw.find((r) => r.id === created.id)
+  assert.ok(JSON.stringify(stored).length < 20000, 'record must not carry the 2MB blob')
+  assert.equal('context' in stored.context.recentReviews[0], false)
+})

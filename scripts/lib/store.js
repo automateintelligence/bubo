@@ -193,6 +193,53 @@ function nextReviewId(root) {
   return max + 1
 }
 
+const CONTEXT_FIELD_CAP = 8192
+const CONTEXT_TOTAL_CAP = 65536
+
+// The few fields dedup (fingerprint reads problem/rendered) and display use.
+// Deliberately omits `context` — carrying it is what made recentReviews recurse.
+function summarizeRecentReview(review) {
+  if (!review || typeof review !== 'object') return review
+  return {
+    id: review.id,
+    timestamp: review.timestamp,
+    reason: review.reason,
+    problem: review.problem,
+    rendered: review.rendered
+  }
+}
+
+// Bound what a review stores as context. The dangerous field is recentReviews:
+// it carried whole prior reviews INCLUDING their context, which carried their
+// recentReviews, and so on — each generation multiplying the store until a
+// single record reached 124MB. Recent reviews are reduced to the fields dedup
+// and display actually read; long strings are capped; and a final guard
+// truncates anything else that ballooned.
+function clampContext(context) {
+  if (!context || typeof context !== 'object') return context
+
+  const out = {}
+  for (const [key, value] of Object.entries(context)) {
+    if (key === 'recentReviews' && Array.isArray(value)) {
+      out[key] = value.map(summarizeRecentReview)
+    } else if (typeof value === 'string' && value.length > CONTEXT_FIELD_CAP) {
+      out[key] = `${value.slice(0, CONTEXT_FIELD_CAP)}…[+${value.length - CONTEXT_FIELD_CAP} chars]`
+    } else {
+      out[key] = value
+    }
+  }
+
+  if (JSON.stringify(out).length > CONTEXT_TOTAL_CAP) {
+    for (const [key, value] of Object.entries(out)) {
+      if (typeof value !== 'string' && JSON.stringify(value).length > CONTEXT_FIELD_CAP) {
+        out[key] = { truncated: true, bytes: JSON.stringify(value).length }
+      }
+    }
+  }
+
+  return out
+}
+
 // Ids come from reviews.jsonl rather than a counter in state.json: state.json
 // is rewritten on nearly every turn and has been observed to rewind, which
 // silently reissues ids that older records already own. The lock makes the
@@ -205,6 +252,8 @@ function createReview(root, payload) {
       timestamp: new Date().toISOString(),
       status: payload.status || 'new',
       ...payload,
+      // Bound before storing, so an unbounded context cannot bloat the store.
+      context: clampContext(payload.context),
       // Assigned last: the store owns ids, never the caller.
       id: nextReviewId(root)
     }
@@ -217,6 +266,8 @@ function createReview(root, payload) {
 module.exports = {
   DEFAULT_CONFIG,
   DEFAULT_STATE,
+  clampContext,
+  summarizeRecentReview,
   appendReview,
   buboDir,
   createReview,
