@@ -8,6 +8,19 @@ He is also, by design, a character. Bubo is an ancient golden war-owl: precise, 
 
 If you only need the practical version: Bubo stores project-scoped review notes in `.bubo/`, can generate and persist compact findings from diffs or tool output, and can inject a live-review skill into Codex startup so those notes appear naturally during a session.
 
+## How does it work?  
+Here is a real example of Bubo commenting and the agent reacting in real time.  It is like having a reviewer watching over your shoulder while you are developing instead of checking your work after you commit or write the PR.
+
+> Bubo Says [140]: arithmetic on a maybe-None inside a test about to be hash-frozen. it will crash where it should assert
+> 
+> Worth stopping on because of where it is. A TypeError inside a gate test makes pytest report an ERROR, not a FAILURE — and an error is indistinguishable from a collection or import problem, which is the exact failure shape the manifest header says each test was deliberately written to avoid. The other three test files show only the expected unresolved-import diagnostic, so this one is anomalous rather than ambient.
+> 
+> It also implies a contract disagreement: item 5 pins Violation.line as an int with a 0 sentinel and never None, and A36's own observation requires "line indexes it." So either the test or the contract is wrong, and pyright can't tell which. The fix has to resolve the optional at the source — a type: ignore or a cast would convert a genuine contract breach into a silent pass inside a frozen check, which is the whole class of thing this gate exists to prevent.
+> 
+> I'll relay it to the gate agent when it reports rather than interrupt mid-run, and I'm adding a pyright pass over the gate tests as a pre-freeze check — gate lint catches weak assertions but not type errors.
+> 
+> Still running: gate rebuild and ledger reconciliation.
+
 ## Requirements
 
 Bubo has two layers:
