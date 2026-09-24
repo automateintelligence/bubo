@@ -39,29 +39,33 @@ There is no `package.json` install flow in this repo. The entrypoints are the ch
 
 ## Installation
 
-### As a Claude Code plugin (marketplace)
+### As a plugin (recommended)
 
-Bubo is a standalone plugin in the [automateintelligence marketplace](https://github.com/automateintelligence/marketplace) — it has no dependency on the other plugins there and installs on its own:
+Bubo is a standalone plugin in the [automateintelligence marketplace](https://github.com/automateintelligence/marketplace) — it has no dependency on the other plugins there and installs on its own.
+
+**Claude Code** — this is the complete install:
 
 ```
 /plugin marketplace add automateintelligence/marketplace
 /plugin install bubo@automateintelligence
 ```
 
+or from a shell: `claude plugin marketplace add automateintelligence/marketplace`, then `claude plugin install bubo@automateintelligence`.
+
 The plugin carries the hooks, the `/bubo` slash command, and the `bubo-live-review` skill, with no per-project setup. At install Claude Code asks for a scope: **user** (all your projects), **project** (all collaborators on one repo), or **local** (just you, one repo) — pick user scope for passive review everywhere, or local to confine it. Use `/bubo stop` in any project where you want Bubo quiet (state is per project, stored in `.bubo/`; notes never cross projects). You may want to add `.bubo/` to your global gitignore.
 
-The plugin covers **Claude Code only**. Codex cannot consume Claude Code plugins, and the plugin's cache directory is ephemeral (its path changes on every update), so the Codex integration must not point at it. If you use Codex — with or without the plugin — set it up from a clone as described below.
+**OpenAI Codex** — set Bubo up [from a clone](#without-the-plugin-from-a-clone). Codex (0.155.0+) can install `bubo@automateintelligence` from the same marketplace, but that adds only the `bubo-live-review` skill; the skill runs the Bubo CLI, which comes from a clone, and so do the Codex `/bubo` prompt and the `codex-bubo` launcher. The plugin's cache directory is also ephemeral (its path changes on every update), so never point the Codex integration at it.
 
-### From a clone
+### Without the plugin (from a clone)
 
-Clone the repo somewhere stable.  Recommend user home, because Bubo works with Codex and Claude.
+This is the Codex setup, and an alternative to the plugin on Claude Code. Clone the repo somewhere stable. Recommend user home, because Bubo works with Codex and Claude.
 
 ```bash
-git clone <your-remote> ~/bubo
+git clone https://github.com/automateintelligence/bubo ~/bubo
 cd ~/bubo
 ```
 
-No npm install step is required for the current repo layout.
+No npm install step is required for the current repo layout. Then, from inside each project you want Bubo to watch, run the [one-command install](#one-command-install), which sets up whichever hosts you have.
 
 If you want a convenient shell entrypoint for Codex sessions with Bubo enabled, add this to `~/.zshrc` or `~/.bashrc`:
 
