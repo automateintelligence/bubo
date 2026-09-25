@@ -54,11 +54,22 @@ or from a shell: `claude plugin marketplace add automateintelligence/marketplace
 
 The plugin carries the hooks, the `/bubo` slash command, and the `bubo-live-review` skill, with no per-project setup. At install Claude Code asks for a scope: **user** (all your projects), **project** (all collaborators on one repo), or **local** (just you, one repo) — pick user scope for passive review everywhere, or local to confine it. Use `/bubo stop` in any project where you want Bubo quiet (state is per project, stored in `.bubo/`; notes never cross projects). You may want to add `.bubo/` to your global gitignore.
 
-**OpenAI Codex** — set Bubo up [from a clone](#without-the-plugin-from-a-clone). Codex (0.155.0+) can install `bubo@automateintelligence` from the same marketplace, but that adds only the `bubo-live-review` skill; the skill runs the Bubo CLI, which comes from a clone, and so do the Codex `/bubo` prompt and the `codex-bubo` launcher. The plugin's cache directory is also ephemeral (its path changes on every update), so never point the Codex integration at it.
+**OpenAI Codex** (0.155.0+) — same marketplace:
+
+```bash
+codex plugin marketplace add automateintelligence/marketplace
+codex plugin add bubo@automateintelligence
+```
+
+Codex asks you to approve the plugin's hooks the first time. The plugin ships the Bubo CLI, so
+nothing else is needed: invoke the skill as `$bubo:bubo-live-review` and it records notes to
+`.bubo/` through the bundled CLI. Codex plugins cannot add slash commands, so `/bubo` is not
+available from the plugin install — for the native `/bubo` prompt and the `codex-bubo` launcher,
+set up [from a clone](#without-the-plugin-from-a-clone) as well.
 
 ### Without the plugin (from a clone)
 
-This is the Codex setup, and an alternative to the plugin on Claude Code. Clone the repo somewhere stable. Recommend user home, because Bubo works with Codex and Claude.
+Use this instead of the plugin, or on Codex alongside it for the `/bubo` prompt and the `codex-bubo` launcher. Clone the repo somewhere stable. Recommend user home, because Bubo works with Codex and Claude.
 
 ```bash
 git clone https://github.com/automateintelligence/bubo ~/bubo
