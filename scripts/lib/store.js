@@ -130,6 +130,88 @@ function readReviews(root) {
     .map((line) => JSON.parse(line))
 }
 
+const TAIL_CHUNK_BYTES = 64 * 1024
+const RECENT_LINE_CAP = 4 * 1024 * 1024
+
+function parseRecord(text) {
+  try {
+    const record = JSON.parse(text)
+    return record && typeof record === 'object' && !Array.isArray(record) ? record : null
+  } catch {
+    return null
+  }
+}
+
+// The last `count` parseable records, oldest first, read backwards from the end
+// of reviews.jsonl. The hooks only ever need the newest few records (dedup and
+// "show the latest note"), and reading the whole store for them made every turn
+// cost as much as the store is large. Damaged lines and a partial trailing
+// append are skipped. A line over maxLineBytes is skipped without being held in
+// memory: no record written since clampContext can reach that size, so one that
+// does is a pre-clamp bloated record that tools/compact-bubo-store.js repairs.
+function readRecentReviews(root, count, options = {}) {
+  ensureProjectState(root)
+  if (!Number.isInteger(count) || count <= 0) return []
+
+  const chunkSize = options.chunkSize || TAIL_CHUNK_BYTES
+  const maxLineBytes = options.maxLineBytes || RECENT_LINE_CAP
+  const file = path.join(buboDir(root), 'reviews.jsonl')
+  const found = []
+  let pieces = []
+  let pieceBytes = 0
+  let oversized = false
+
+  const addPiece = (piece) => {
+    if (oversized || piece.length === 0) return
+    pieceBytes += piece.length
+    if (pieceBytes > maxLineBytes) {
+      oversized = true
+      pieces = []
+      return
+    }
+    // Copied: the read buffer is reused for the next chunk.
+    pieces.push(Buffer.from(piece))
+  }
+
+  const finishLine = () => {
+    if (!oversized && pieceBytes > 0) {
+      const record = parseRecord(Buffer.concat(pieces.reverse()).toString('utf8'))
+      if (record) found.push(record)
+    }
+    pieces = []
+    pieceBytes = 0
+    oversized = false
+  }
+
+  const fd = fs.openSync(file, 'r')
+  try {
+    const buffer = Buffer.alloc(chunkSize)
+    let pos = fs.fstatSync(fd).size
+    while (pos > 0 && found.length < count) {
+      const length = Math.min(chunkSize, pos)
+      pos -= length
+      fs.readSync(fd, buffer, 0, length, pos)
+      const chunk = buffer.subarray(0, length)
+
+      let end = length
+      let newline = end > 0 ? chunk.lastIndexOf(0x0a, end - 1) : -1
+      while (newline !== -1 && found.length < count) {
+        addPiece(chunk.subarray(newline + 1, end))
+        finishLine()
+        end = newline
+        newline = end > 0 ? chunk.lastIndexOf(0x0a, end - 1) : -1
+      }
+      if (found.length < count) addPiece(chunk.subarray(0, end))
+    }
+    // The first line of the file has no newline before it.
+    if (found.length < count) finishLine()
+  } finally {
+    fs.closeSync(fd)
+  }
+
+  return found.reverse()
+}
+
 // Staged write plus rename. A plain writeFileSync truncates the canonical file
 // first, so a kill or a full disk mid-write leaves partial JSONL: history is
 // lost, and with it the high-water mark, so ids start being reissued. rename is
@@ -161,26 +243,73 @@ function rewriteReviews(root, reviews, options = {}) {
   }
 }
 
+// createReview assigns `id` last, so a record it wrote ends with `,"id":N}`. A
+// `,` or `{` before the key means it is a top-level key, not text inside a
+// string (a quote in a string is escaped). Reading the id off the line's tail
+// spares JSON.parse of the whole record, which for a bloated pre-clamp record
+// meant hundreds of megabytes per line.
+const TRAILING_ID = /[{,]"id":(\d+)\}$/
+const TRAILING_ID_WINDOW = 48
+const SCAN_CHUNK_BYTES = 1024 * 1024
+
+function lineId(pieces) {
+  let tail = ''
+  for (let i = pieces.length - 1; i >= 0 && tail.length < TRAILING_ID_WINDOW; i -= 1) {
+    tail = pieces[i].toString('latin1') + tail
+  }
+  const match = TRAILING_ID.exec(tail.slice(-TRAILING_ID_WINDOW))
+  if (match) return Number(match[1])
+  // Older records (and ones rewritten by key order) may carry id elsewhere.
+  const record = parseRecord(Buffer.concat(pieces).toString('utf8'))
+  return record ? record.id : undefined
+}
+
 // The highest id the store has ever handed out. Scanned from reviews.jsonl
 // itself — the only append-only, never-reset record of what is taken. Damaged
 // lines are skipped rather than thrown on, so one bad record cannot block every
-// future review.
-function maxReviewId(root) {
+// future review. The file is streamed in chunks rather than read into one
+// string, so memory follows the largest line rather than the whole store.
+function maxReviewId(root, options = {}) {
   const file = path.join(buboDir(root), 'reviews.jsonl')
   if (!fs.existsSync(file)) return 0
 
-  return fs.readFileSync(file, 'utf8')
-    .split('\n')
-    .filter(Boolean)
-    .reduce((max, line) => {
-      let id
-      try {
-        id = JSON.parse(line).id
-      } catch {
-        return max
+  const chunkSize = options.chunkSize || SCAN_CHUNK_BYTES
+  let max = 0
+  let pieces = []
+
+  const finishLine = () => {
+    if (pieces.length) {
+      const id = lineId(pieces)
+      if (Number.isSafeInteger(id) && id > max) max = id
+    }
+    pieces = []
+  }
+
+  const fd = fs.openSync(file, 'r')
+  try {
+    for (;;) {
+      // A fresh buffer per read: pieces of the current line keep references.
+      const buffer = Buffer.allocUnsafe(chunkSize)
+      const length = fs.readSync(fd, buffer, 0, chunkSize, null)
+      if (length === 0) break
+      const chunk = buffer.subarray(0, length)
+
+      let start = 0
+      let newline = chunk.indexOf(0x0a, start)
+      while (newline !== -1) {
+        if (newline > start) pieces.push(chunk.subarray(start, newline))
+        finishLine()
+        start = newline + 1
+        newline = chunk.indexOf(0x0a, start)
       }
-      return Number.isSafeInteger(id) && id > max ? id : max
-    }, 0)
+      if (start < length) pieces.push(chunk.subarray(start))
+    }
+    finishLine()
+  } finally {
+    fs.closeSync(fd)
+  }
+
+  return max
 }
 
 // Past MAX_SAFE_INTEGER, `max + 1 === max` and every later review would silently
@@ -314,6 +443,7 @@ module.exports = {
   ensureProjectState,
   maxReviewId,
   readConfig,
+  readRecentReviews,
   readReviews,
   readState,
   rewriteReviews,

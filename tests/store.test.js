@@ -11,6 +11,8 @@ const {
   ensureProjectState,
   appendReview,
   createReview,
+  maxReviewId,
+  readRecentReviews,
   readReviews,
   readState,
   rewriteReviews,
@@ -377,4 +379,89 @@ test('a review created with a fat context is stored bounded', () => {
   const stored = raw.find((r) => r.id === created.id)
   assert.ok(JSON.stringify(stored).length < 20000, 'record must not carry the 2MB blob')
   assert.equal('context' in stored.context.recentReviews[0], false)
+})
+
+function writeStoreLines(root, text) {
+  ensureProjectState(root)
+  fs.writeFileSync(path.join(root, '.bubo', 'reviews.jsonl'), text)
+}
+
+test('readRecentReviews returns the newest records, oldest first, across chunk boundaries', () => {
+  const root = makeProjectRoot('bubo-recent-')
+  ensureProjectState(root)
+  for (let id = 1; id <= 9; id += 1) {
+    appendReview(root, { id, rendered: `review ${id} ${'x'.repeat(id * 7)}` })
+  }
+  const expected = readReviews(root).slice(-4)
+
+  for (const chunkSize of [1, 3, 17, 64, 65536]) {
+    assert.deepEqual(readRecentReviews(root, 4, { chunkSize }), expected, `chunkSize ${chunkSize}`)
+  }
+  assert.deepEqual(readRecentReviews(root, 50).map((r) => r.id), [1, 2, 3, 4, 5, 6, 7, 8, 9])
+  assert.deepEqual(readRecentReviews(root, 1).map((r) => r.id), [9])
+})
+
+test('readRecentReviews is empty for an empty store or a non-positive count', () => {
+  const root = makeProjectRoot('bubo-recent-empty-')
+  ensureProjectState(root)
+  assert.deepEqual(readRecentReviews(root, 5), [])
+  appendReview(root, { id: 1, rendered: 'only' })
+  assert.deepEqual(readRecentReviews(root, 0), [])
+})
+
+test('readRecentReviews skips damaged lines and a partial trailing append', () => {
+  const root = makeProjectRoot('bubo-recent-damaged-')
+  writeStoreLines(root, [
+    JSON.stringify({ id: 1, rendered: 'a' }),
+    '{"id":2,"rendered":',
+    'null',
+    JSON.stringify({ id: 3, rendered: 'c' }),
+    '{"id":4,"rend'
+  ].join('\n'))
+
+  for (const chunkSize of [2, 5, 65536]) {
+    assert.deepEqual(readRecentReviews(root, 2, { chunkSize }).map((r) => r.id), [1, 3])
+  }
+})
+
+test('readRecentReviews skips an oversized record without failing the read', () => {
+  const root = makeProjectRoot('bubo-recent-oversized-')
+  ensureProjectState(root)
+  appendReview(root, { id: 1, rendered: 'small one' })
+  appendReview(root, { id: 2, rendered: 'big', context: { blob: 'z'.repeat(5000) } })
+  appendReview(root, { id: 3, rendered: 'small three' })
+
+  for (const chunkSize of [7, 1024, 65536]) {
+    const recent = readRecentReviews(root, 3, { chunkSize, maxLineBytes: 1000 })
+    assert.deepEqual(recent.map((r) => r.id), [1, 3], `chunkSize ${chunkSize}`)
+  }
+})
+
+test('maxReviewId agrees with a full parse, including ids that are not the last key', () => {
+  const root = makeProjectRoot('bubo-maxid-')
+  const lines = [
+    JSON.stringify({ rendered: 'trailing', id: 4 }),
+    JSON.stringify({ id: 11, rendered: 'legacy key order' }),
+    JSON.stringify({ id: 2, note: 'x,"id":999}' }),
+    JSON.stringify({ id: 3, context: { id: 500 } }),
+    '{"id":777,"rendered":',
+    '{"rendered":"unsafe","id":9007199254740993}',
+    JSON.stringify({ rendered: 'last', id: 7 })
+  ]
+  writeStoreLines(root, `${lines.join('\n')}\n`)
+
+  for (const chunkSize of [1, 4, 33, 1024 * 1024]) {
+    assert.equal(maxReviewId(root, { chunkSize }), 11, `chunkSize ${chunkSize}`)
+  }
+
+  writeStoreLines(root, JSON.stringify({ rendered: 'no newline', id: 42 }))
+  assert.equal(maxReviewId(root, { chunkSize: 5 }), 42)
+})
+
+test('createReview allocates past a multi-megabyte record', () => {
+  const root = makeProjectRoot('bubo-maxid-large-')
+  ensureProjectState(root)
+  appendReview(root, { rendered: 'huge', context: { blob: 'y'.repeat(2 * 1024 * 1024) }, id: 40 })
+  const created = createReview(root, makePayload('after huge'))
+  assert.equal(created.id, 41)
 })
