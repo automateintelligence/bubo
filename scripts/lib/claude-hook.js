@@ -1,6 +1,6 @@
 const { execSync } = require('node:child_process')
 
-const { ensureProjectState, readReviews, readState } = require('./store')
+const { ensureProjectState, readState } = require('./store')
 const { resolveProjectRoot } = require('./project')
 const { renderReviewLine } = require('./render')
 const {

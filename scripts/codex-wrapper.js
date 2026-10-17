@@ -3,7 +3,7 @@
 const { spawnSync } = require('node:child_process')
 
 const { resolveProjectRoot } = require('./lib/project')
-const { ensureProjectState, readReviews } = require('./lib/store')
+const { ensureProjectState, readRecentReviews } = require('./lib/store')
 const { buildStartupPrompt, createStartReview } = require('./lib/session')
 
 function parseArgs(argv) {
@@ -64,7 +64,7 @@ async function main(argv) {
     review = await createStartReview(projectRoot, options)
   } else {
     ensureProjectState(projectRoot)
-    review = readReviews(projectRoot).at(-1) || null
+    review = readRecentReviews(projectRoot, 1)[0] || null
   }
 
   const spec = buildLaunchSpec({
