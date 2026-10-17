@@ -251,33 +251,24 @@ function rewriteReviews(root, reviews, options = {}) {
   }
 }
 
-// createReview assigns `id` last, so a record it wrote ends with `,"id":N}`. A
-// `,` or `{` before the key means it is a top-level key, not text inside a
-// string (a quote in a string is escaped). Reading the id off the line's tail
-// spares JSON.parse of the whole record, which for a bloated pre-clamp record
-// meant hundreds of megabytes per line. The shortcut cannot tell a damaged line
-// from a valid one, so it is reserved for lines no clamped record can reach;
-// ordinary lines are still fully parsed and a damaged one is still skipped.
-const TRAILING_ID = /[{,]"id":(\d+)\}$/
-const TRAILING_ID_WINDOW = 48
-const TRAILING_ID_MIN_BYTES = 1024 * 1024
 const SCAN_CHUNK_BYTES = 1024 * 1024
 
-function lineId(pieces, options = {}) {
-  const lineBytes = pieces.reduce((sum, piece) => sum + piece.length, 0)
-  if (lineBytes < (options.trailingIdMinBytes || TRAILING_ID_MIN_BYTES)) {
-    const record = parseRecord(Buffer.concat(pieces).toString('utf8'))
-    return record ? record.id : undefined
+// Every line is fully parsed: an id read off a damaged line could be anything,
+// and one bogus high id would exhaust the id space for every later review. A
+// line too long to become a string cannot be judged at all, so allocation
+// stops with a fix rather than skipping it and risking reissuing its id.
+function lineId(pieces, file) {
+  let text
+  try {
+    text = Buffer.concat(pieces).toString('utf8')
+  } catch (error) {
+    if (error.code !== 'ERR_STRING_TOO_LONG') throw error
+    throw new Error(
+      `Bubo store has a record too large to read: ${file}\n` +
+      '  Compact it with: node tools/compact-bubo-store.js <project> --write'
+    )
   }
-
-  let tail = ''
-  for (let i = pieces.length - 1; i >= 0 && tail.length < TRAILING_ID_WINDOW; i -= 1) {
-    tail = pieces[i].toString('latin1') + tail
-  }
-  const match = TRAILING_ID.exec(tail.slice(-TRAILING_ID_WINDOW))
-  if (match) return Number(match[1])
-  // Older records (and ones rewritten by key order) may carry id elsewhere.
-  const record = parseRecord(Buffer.concat(pieces).toString('utf8'))
+  const record = parseRecord(text)
   return record ? record.id : undefined
 }
 
@@ -296,7 +287,7 @@ function maxReviewId(root, options = {}) {
 
   const finishLine = () => {
     if (pieces.length) {
-      const id = lineId(pieces, options)
+      const id = lineId(pieces, file)
       if (Number.isSafeInteger(id) && id > max) max = id
     }
     pieces = []

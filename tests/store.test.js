@@ -471,27 +471,19 @@ test('maxReviewId agrees with a full parse, including ids that are not the last 
   assert.equal(maxReviewId(root, { chunkSize: 5 }), 42)
 })
 
-test('maxReviewId ignores the id of a damaged ordinary-sized line', () => {
+test('maxReviewId ignores the id of a damaged line of any size', () => {
   const root = makeProjectRoot('bubo-maxid-damaged-')
   writeStoreLines(root, [
     JSON.stringify({ rendered: 'fine', id: 5 }),
     '{"rendered": BROKEN,"id":9007199254740991}',
-    '{"rendered": BROKEN,"id":800}'
+    '{"rendered": BROKEN,"id":800}',
+    `{"rendered": BROKEN,"context":"${'x'.repeat(2 * 1024 * 1024)}","id":9007199254740991}`
   ].join('\n') + '\n')
 
   assert.equal(maxReviewId(root), 5)
   assert.equal(createReview(root, makePayload('after damage')).id, 6)
 })
 
-test('maxReviewId reads a large line by its trailing id and agrees with a full parse', () => {
-  const root = makeProjectRoot('bubo-maxid-trailing-')
-  const big = JSON.stringify({ rendered: 'big', context: { blob: 'q'.repeat(4096), id: 900 }, id: 12 })
-  writeStoreLines(root, `${JSON.stringify({ id: 3 })}\n${big}\n`)
-
-  for (const trailingIdMinBytes of [64, 1024 * 1024]) {
-    assert.equal(maxReviewId(root, { chunkSize: 1000, trailingIdMinBytes }), 12)
-  }
-})
 
 test('createReview allocates past a multi-megabyte record', () => {
   const root = makeProjectRoot('bubo-maxid-large-')
