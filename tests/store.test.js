@@ -437,6 +437,19 @@ test('readRecentReviews skips an oversized record without failing the read', () 
   }
 })
 
+test('readRecentReviews stops at its scan budget and drops the line it cut', () => {
+  const root = makeProjectRoot('bubo-recent-budget-')
+  ensureProjectState(root)
+  appendReview(root, { id: 1, rendered: 'beyond the budget' })
+  appendReview(root, { id: 2, rendered: 'straddles', context: { blob: 'w'.repeat(3000) } })
+  appendReview(root, { id: 3, rendered: 'inside the budget' })
+
+  for (const chunkSize of [7, 256, 65536]) {
+    const recent = readRecentReviews(root, 3, { chunkSize, maxScanBytes: 1000 })
+    assert.deepEqual(recent.map((r) => r.id), [3], `chunkSize ${chunkSize}`)
+  }
+})
+
 test('maxReviewId agrees with a full parse, including ids that are not the last key', () => {
   const root = makeProjectRoot('bubo-maxid-')
   const lines = [
@@ -456,6 +469,28 @@ test('maxReviewId agrees with a full parse, including ids that are not the last 
 
   writeStoreLines(root, JSON.stringify({ rendered: 'no newline', id: 42 }))
   assert.equal(maxReviewId(root, { chunkSize: 5 }), 42)
+})
+
+test('maxReviewId ignores the id of a damaged ordinary-sized line', () => {
+  const root = makeProjectRoot('bubo-maxid-damaged-')
+  writeStoreLines(root, [
+    JSON.stringify({ rendered: 'fine', id: 5 }),
+    '{"rendered": BROKEN,"id":9007199254740991}',
+    '{"rendered": BROKEN,"id":800}'
+  ].join('\n') + '\n')
+
+  assert.equal(maxReviewId(root), 5)
+  assert.equal(createReview(root, makePayload('after damage')).id, 6)
+})
+
+test('maxReviewId reads a large line by its trailing id and agrees with a full parse', () => {
+  const root = makeProjectRoot('bubo-maxid-trailing-')
+  const big = JSON.stringify({ rendered: 'big', context: { blob: 'q'.repeat(4096), id: 900 }, id: 12 })
+  writeStoreLines(root, `${JSON.stringify({ id: 3 })}\n${big}\n`)
+
+  for (const trailingIdMinBytes of [64, 1024 * 1024]) {
+    assert.equal(maxReviewId(root, { chunkSize: 1000, trailingIdMinBytes }), 12)
+  }
 })
 
 test('createReview allocates past a multi-megabyte record', () => {

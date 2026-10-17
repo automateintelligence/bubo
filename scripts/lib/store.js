@@ -130,8 +130,9 @@ function readReviews(root) {
     .map((line) => JSON.parse(line))
 }
 
-const TAIL_CHUNK_BYTES = 64 * 1024
+const TAIL_CHUNK_BYTES = 1024 * 1024
 const RECENT_LINE_CAP = 4 * 1024 * 1024
+const RECENT_SCAN_CAP = 32 * 1024 * 1024
 
 function parseRecord(text) {
   try {
@@ -149,12 +150,16 @@ function parseRecord(text) {
 // append are skipped. A line over maxLineBytes is skipped without being held in
 // memory: no record written since clampContext can reach that size, so one that
 // does is a pre-clamp bloated record that tools/compact-bubo-store.js repairs.
+// The scan stops after maxScanBytes, so even such a store costs a bounded read
+// per turn (backward reads get no readahead, so an unbounded scan of a bloated
+// store ran past a minute); the price is fewer recent records to dedup against.
 function readRecentReviews(root, count, options = {}) {
   ensureProjectState(root)
   if (!Number.isInteger(count) || count <= 0) return []
 
   const chunkSize = options.chunkSize || TAIL_CHUNK_BYTES
   const maxLineBytes = options.maxLineBytes || RECENT_LINE_CAP
+  const maxScanBytes = options.maxScanBytes || RECENT_SCAN_CAP
   const file = path.join(buboDir(root), 'reviews.jsonl')
   const found = []
   let pieces = []
@@ -186,9 +191,11 @@ function readRecentReviews(root, count, options = {}) {
   const fd = fs.openSync(file, 'r')
   try {
     const buffer = Buffer.alloc(chunkSize)
-    let pos = fs.fstatSync(fd).size
-    while (pos > 0 && found.length < count) {
-      const length = Math.min(chunkSize, pos)
+    const size = fs.fstatSync(fd).size
+    const floor = Math.max(0, size - maxScanBytes)
+    let pos = size
+    while (pos > floor && found.length < count) {
+      const length = Math.min(chunkSize, pos - floor)
       pos -= length
       fs.readSync(fd, buffer, 0, length, pos)
       const chunk = buffer.subarray(0, length)
@@ -203,8 +210,9 @@ function readRecentReviews(root, count, options = {}) {
       }
       if (found.length < count) addPiece(chunk.subarray(0, end))
     }
-    // The first line of the file has no newline before it.
-    if (found.length < count) finishLine()
+    // The first line of the file has no newline before it. A line cut off by
+    // the scan budget is incomplete, so it is dropped rather than parsed.
+    if (found.length < count && pos === 0) finishLine()
   } finally {
     fs.closeSync(fd)
   }
@@ -247,12 +255,21 @@ function rewriteReviews(root, reviews, options = {}) {
 // `,` or `{` before the key means it is a top-level key, not text inside a
 // string (a quote in a string is escaped). Reading the id off the line's tail
 // spares JSON.parse of the whole record, which for a bloated pre-clamp record
-// meant hundreds of megabytes per line.
+// meant hundreds of megabytes per line. The shortcut cannot tell a damaged line
+// from a valid one, so it is reserved for lines no clamped record can reach;
+// ordinary lines are still fully parsed and a damaged one is still skipped.
 const TRAILING_ID = /[{,]"id":(\d+)\}$/
 const TRAILING_ID_WINDOW = 48
+const TRAILING_ID_MIN_BYTES = 1024 * 1024
 const SCAN_CHUNK_BYTES = 1024 * 1024
 
-function lineId(pieces) {
+function lineId(pieces, options = {}) {
+  const lineBytes = pieces.reduce((sum, piece) => sum + piece.length, 0)
+  if (lineBytes < (options.trailingIdMinBytes || TRAILING_ID_MIN_BYTES)) {
+    const record = parseRecord(Buffer.concat(pieces).toString('utf8'))
+    return record ? record.id : undefined
+  }
+
   let tail = ''
   for (let i = pieces.length - 1; i >= 0 && tail.length < TRAILING_ID_WINDOW; i -= 1) {
     tail = pieces[i].toString('latin1') + tail
@@ -279,7 +296,7 @@ function maxReviewId(root, options = {}) {
 
   const finishLine = () => {
     if (pieces.length) {
-      const id = lineId(pieces)
+      const id = lineId(pieces, options)
       if (Number.isSafeInteger(id) && id > max) max = id
     }
     pieces = []
